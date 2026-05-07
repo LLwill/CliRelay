@@ -52,7 +52,7 @@ func buildAuthTagPayloadFromValues(provider string, metadata map[string]any) aut
 		hiddenSet[tag] = struct{}{}
 	}
 
-	displayTags := explicitDisplayTags
+	var displayTags []string
 	if !hasExplicitDisplayTags {
 		displayTags = make([]string, 0, len(defaultTags)+len(customTags))
 		for _, tag := range defaultTags {

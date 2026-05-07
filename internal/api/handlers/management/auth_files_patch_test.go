@@ -474,8 +474,8 @@ func TestBuildAuthFileEntryDedupesDuplicateRestrictions(t *testing.T) {
 		Attributes: map[string]string{
 			"path": "codex-429-dedupe.json",
 		},
-		StatusMessage: `{"error":{"type":"usage_limit_reached"}}`,
-		Unavailable:   false,
+		StatusMessage:  `{"error":{"type":"usage_limit_reached"}}`,
+		Unavailable:    false,
 		NextRetryAfter: nextRetry,
 		LastError:      &coreauth.Error{Message: "usage limit reached", HTTPStatus: http.StatusTooManyRequests},
 		Quota: coreauth.QuotaState{
