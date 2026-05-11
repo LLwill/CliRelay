@@ -1,12 +1,14 @@
 package cliproxy
 
-import "context"
-
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -121,5 +123,49 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 	}
 	if !seenGlobalExcluded {
 		t.Fatal("expected global excluded model to be present when attribute override is set")
+	}
+}
+
+func TestRegisterModelsForAuth_AddsUserModelConfigsForOAuthProvider(t *testing.T) {
+	usage.CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, internalconfig.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:     "claude-opus-4-7",
+		OwnedBy:     "claude",
+		Description: "User-defined Claude OAuth model",
+		Enabled:     true,
+		Source:      "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "claude-oauth-user-models",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"email": "claude@example.com",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	if !hasModelID(registry.GetAvailableModelsByProvider("claude"), "claude-opus-4-7") {
+		t.Fatal("expected user-defined Claude model config to be registered for Claude OAuth auth")
 	}
 }
