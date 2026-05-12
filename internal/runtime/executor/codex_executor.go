@@ -1010,9 +1010,13 @@ func parseCodexQuotaProbe(body []byte) *cliproxyauth.QuotaProbeResult {
 	allowed := rateLimit.Get("allowed")
 	limitReached := rateLimit.Get("limit_reached")
 	if limitReached.Exists() && limitReached.Bool() {
+		nextRecoverAt := codexQuotaProbeNextRecoverAt(rateLimit, true)
+		if nextRecoverAt.IsZero() {
+			nextRecoverAt = codexQuotaProbeNextRecoverAt(rateLimit, false)
+		}
 		return &cliproxyauth.QuotaProbeResult{
 			Recovered:     false,
-			NextRecoverAt: codexQuotaProbeNextRecoverAt(rateLimit, false),
+			NextRecoverAt: nextRecoverAt,
 		}
 	}
 

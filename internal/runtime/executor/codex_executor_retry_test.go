@@ -135,6 +135,24 @@ func TestParseCodexQuotaProbe(t *testing.T) {
 			t.Fatalf("NextRecoverAt = %v, want %v", got.NextRecoverAt, time.Unix(resetAt, 0))
 		}
 	})
+
+	t.Run("prefers exhausted window reset when explicit limit reached", func(t *testing.T) {
+		primaryResetAt := time.Date(2030, 1, 1, 1, 0, 0, 0, time.UTC).Unix()
+		secondaryResetAt := time.Date(2030, 1, 1, 6, 0, 0, 0, time.UTC).Unix()
+		body := []byte(`{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":1,"reset_at":` + itoa(primaryResetAt) + `},"secondary_window":{"used_percent":100,"reset_at":` + itoa(secondaryResetAt) + `}}}`)
+
+		got := parseCodexQuotaProbe(body)
+		if got == nil {
+			t.Fatal("expected quota probe result, got nil")
+		}
+		if got.Recovered {
+			t.Fatal("Recovered = true, want false while limit_reached is true")
+		}
+		wantRecoverAt := time.Unix(secondaryResetAt, 0)
+		if !got.NextRecoverAt.Equal(wantRecoverAt) {
+			t.Fatalf("NextRecoverAt = %v, want %v", got.NextRecoverAt, wantRecoverAt)
+		}
+	})
 }
 
 func itoa(v int64) string {
