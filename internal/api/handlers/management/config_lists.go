@@ -375,17 +375,19 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 	if body.Value.Key != nil {
 		trimmed := strings.TrimSpace(*body.Value.Key)
 		if trimmed == "" {
-			if err := usage.DeleteAPIKey(targetKey); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			h.refreshAPIKeyCache()
-			c.JSON(200, gin.H{"status": "ok"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
 			return
 		}
 		// Key change: delete old, insert new
 		if trimmed != targetKey {
-			_ = usage.DeleteAPIKey(targetKey)
+			if existing := usage.GetAPIKey(trimmed); existing != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "api key already exists"})
+				return
+			}
+			if err := usage.DeleteAPIKey(targetKey); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		entry.Key = trimmed
 	}
