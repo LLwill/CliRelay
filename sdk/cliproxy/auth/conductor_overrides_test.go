@@ -56,7 +56,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 }
 
-func TestManager_ShouldRetryAfterError_DisablesInternalRetryForGroupedRoute(t *testing.T) {
+func TestManager_ShouldRetryAfterError_AllowsInternalRetryForGroupedRoute(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second)
 
@@ -80,11 +80,11 @@ func TestManager_ShouldRetryAfterError_DisablesInternalRetryForGroupedRoute(t *t
 	_, maxWait := m.retrySettings()
 	meta := map[string]any{"route_group": "pro"}
 	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait, meta)
-	if shouldRetry {
-		t.Fatalf("expected shouldRetry=false for grouped route, got true (wait=%v)", wait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for grouped route with cooled-down auth, got false")
 	}
-	if wait != 0 {
-		t.Fatalf("expected wait=0 for grouped route, got %v", wait)
+	if wait <= 0 {
+		t.Fatalf("expected wait > 0 for grouped route retry, got %v", wait)
 	}
 }
 
@@ -117,6 +117,38 @@ func TestManager_ShouldRetryAfterError_DisablesInternalRetryForSinglePick(t *tes
 	}
 	if wait != 0 {
 		t.Fatalf("expected wait=0 for single-pick request, got %v", wait)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_DisablesInternalRetryForPinnedAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second)
+
+	model := "test-model"
+	next := time.Now().Add(5 * time.Second)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, maxWait := m.retrySettings()
+	meta := map[string]any{"pinned_auth_id": "auth-1"}
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"codex"}, model, maxWait, meta)
+	if shouldRetry {
+		t.Fatalf("expected shouldRetry=false for pinned auth request, got true (wait=%v)", wait)
+	}
+	if wait != 0 {
+		t.Fatalf("expected wait=0 for pinned auth request, got %v", wait)
 	}
 }
 

@@ -139,7 +139,7 @@ func registerGroupedRouteTestAuths(t *testing.T, manager *Manager) {
 	}
 }
 
-func TestManagerExecute_GroupedRouteStopsAfterFirstFailure(t *testing.T) {
+func TestManagerExecute_GroupedRouteFailsOverWithinGroup(t *testing.T) {
 	t.Parallel()
 
 	executor := &sequenceExecutor{}
@@ -147,19 +147,22 @@ func TestManagerExecute_GroupedRouteStopsAfterFirstFailure(t *testing.T) {
 	manager.RegisterExecutor(executor)
 	registerGroupedRouteTestAuths(t, manager)
 
-	_, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+	resp, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
 		Metadata: map[string]any{cliproxyexecutor.RouteGroupMetadataKey: "pro"},
 	})
-	if err == nil {
-		t.Fatal("expected error")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("Execute() payload = %q, want %q", string(resp.Payload), "ok")
 	}
 
 	calls := executor.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly 1 upstream attempt, got %v", calls)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 upstream attempts within group, got %v", calls)
 	}
-	if calls[0] != "auth-a" {
-		t.Fatalf("expected grouped route to use the first selected auth, got %v", calls)
+	if calls[0] != "auth-a" || calls[1] != "auth-b" {
+		t.Fatalf("expected grouped route failover sequence [auth-a auth-b], got %v", calls)
 	}
 }
 

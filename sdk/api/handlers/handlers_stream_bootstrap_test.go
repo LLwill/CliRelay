@@ -248,10 +248,10 @@ func (e *authAwareStreamExecutor) ExecuteStream(ctx context.Context, auth *corea
 	if authID == "auth1" {
 		ch <- coreexecutor.StreamChunk{
 			Err: &coreauth.Error{
-				Code:       "unauthorized",
-				Message:    "unauthorized",
+				Code:       "usage_limit_reached",
+				Message:    "You've hit your usage limit.",
 				Retryable:  false,
-				HTTPStatus: http.StatusUnauthorized,
+				HTTPStatus: http.StatusTooManyRequests,
 			},
 		}
 		close(ch)
@@ -538,9 +538,11 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	}
 
 	var gotErr error
+	var gotStatus int
 	for msg := range errChan {
 		if msg != nil && msg.Error != nil {
 			gotErr = msg.Error
+			gotStatus = msg.StatusCode
 		}
 	}
 
@@ -550,9 +552,12 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	if gotErr == nil {
 		t.Fatalf("expected terminal error, got nil")
 	}
+	if gotStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected status %d, got %d", http.StatusTooManyRequests, gotStatus)
+	}
 	authIDs := executor.AuthIDs()
-	if len(authIDs) == 0 {
-		t.Fatalf("expected at least one upstream attempt")
+	if len(authIDs) != 1 {
+		t.Fatalf("expected exactly 1 upstream attempt for pinned auth, got %v", authIDs)
 	}
 	for _, authID := range authIDs {
 		if authID != "auth1" {
@@ -561,7 +566,7 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	}
 }
 
-func TestExecuteStreamWithAuthManager_GroupedRouteDoesNotBootstrapRetry(t *testing.T) {
+func TestExecuteStreamWithAuthManager_GroupedRouteRetriesWithinGroupBeforeFirstByte(t *testing.T) {
 	executor := &authAwareStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -624,18 +629,18 @@ func TestExecuteStreamWithAuthManager_GroupedRouteDoesNotBootstrapRetry(t *testi
 		}
 	}
 
-	if len(got) != 0 {
-		t.Fatalf("expected empty payload, got %q", string(got))
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok after grouped route retry, got %q", string(got))
 	}
-	if gotErr == nil {
-		t.Fatalf("expected terminal error, got nil")
+	if gotErr != nil {
+		t.Fatalf("expected no terminal error after grouped route retry, got %v", gotErr)
 	}
 	authIDs := executor.AuthIDs()
-	if len(authIDs) != 1 {
-		t.Fatalf("expected exactly 1 upstream attempt, got %v", authIDs)
+	if len(authIDs) != 2 {
+		t.Fatalf("expected 2 upstream attempts within group, got %v", authIDs)
 	}
-	if authIDs[0] != "auth1" {
-		t.Fatalf("expected grouped route to stop on auth1, got %v", authIDs)
+	if authIDs[0] != "auth1" || authIDs[1] != "auth2" {
+		t.Fatalf("expected grouped route retry sequence [auth1 auth2], got %v", authIDs)
 	}
 }
 

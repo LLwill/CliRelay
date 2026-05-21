@@ -926,12 +926,13 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	}
 }
 
+// Explicit single-pick controls pin execution to one auth; route groups only scope candidates.
 func isSinglePickRouteRequest(meta map[string]any) bool {
-	if routeGroupFromMetadata(meta) != "" {
-		return true
-	}
 	if len(meta) == 0 {
 		return false
+	}
+	if pinnedAuthIDFromMetadata(meta) != "" {
+		return true
 	}
 	raw, ok := meta[cliproxyexecutor.SinglePickMetadataKey]
 	if !ok || raw == nil {
