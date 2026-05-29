@@ -46,22 +46,39 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 	// to stable auth_index values (and reflect renamed OAuth channels).
 	keyNameMap, channelNameMap, authIndexChannelMap, ambiguousAuthIndexChannelMap := h.buildNameMaps()
 
-	channelFilterRaw := strings.TrimSpace(c.Query("channel"))
-	if channelFilterRaw == "" {
-		channelFilterRaw = strings.TrimSpace(c.Query("channel_name"))
+		// Read channel multi-value: support repeated ?channel=x&channel=y,
+	// plural ?channels=x,y, and legacy alias ?channel_name=x / ?channel-name=x.
+	channelValues := queryStringListMulti(c, "channel", "channels")
+	// Merge legacy aliases (channel_name, channel-name) into channelValues.
+	if raw := strings.TrimSpace(c.Query("channel_name")); raw != "" {
+		channelValues = append(channelValues, raw)
 	}
-	if channelFilterRaw == "" {
-		channelFilterRaw = strings.TrimSpace(c.Query("channel-name"))
+	if raw := strings.TrimSpace(c.Query("channel-name")); raw != "" {
+		channelValues = append(channelValues, raw)
 	}
-	selectedChannelKeys := make(map[string]struct{})
-	if channelFilterRaw != "" {
-		for _, part := range strings.Split(channelFilterRaw, ",") {
-			key := strings.ToLower(strings.TrimSpace(part))
-			if key == "" {
-				continue
-			}
-			selectedChannelKeys[key] = struct{}{}
+	// Deduplicate after merging legacy aliases
+	chanSeen := make(map[string]struct{}, len(channelValues))
+	deduped := make([]string, 0, len(channelValues))
+	for _, v := range channelValues {
+		lower := strings.ToLower(strings.TrimSpace(v))
+		if lower == "" {
+			continue
 		}
+		if _, ok := chanSeen[lower]; ok {
+			continue
+		}
+		chanSeen[lower] = struct{}{}
+		deduped = append(deduped, v)
+	}
+	channelValues = deduped
+
+	selectedChannelKeys := make(map[string]struct{})
+	for _, part := range channelValues {
+		key := strings.ToLower(strings.TrimSpace(part))
+		if key == "" {
+			continue
+		}
+		selectedChannelKeys[key] = struct{}{}
 	}
 	var authIndexes []string
 	var channelNames []string
