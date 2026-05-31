@@ -79,6 +79,17 @@ func (e *OpenCodeGoExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth
 }
 
 func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Vision preprocessing: when the model doesn't support vision but the
+	// current request has images, call qwen3.5-plus internally to get a text
+	// description and replace the image. The model is never changed, so
+	// Codex Desktop always sees deepseek-v4-flash.
+	apiKey := opencodeGoAPIKey(auth)
+	if opencodeGoNeedsReasoningInjection(req.Model) && opencodeGoHasCurrentImage(req.Payload) && apiKey != "" {
+		if preprocessed, ok := opencodeGoPreprocessVision(ctx, e.cfg, auth, apiKey, req.Payload); ok {
+			req.Payload = preprocessed
+		}
+	}
+
 	fallback := e.applyVisionFallback(auth, req, opts)
 	req = fallback.Request
 	if !fallback.Applied {
@@ -124,6 +135,14 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	// Vision preprocessing: replace images with qwen descriptions.
+	apiKey := opencodeGoAPIKey(auth)
+	if opencodeGoNeedsReasoningInjection(req.Model) && opencodeGoHasCurrentImage(req.Payload) && apiKey != "" {
+		if preprocessed, ok := opencodeGoPreprocessVision(ctx, e.cfg, auth, apiKey, req.Payload); ok {
+			req.Payload = preprocessed
+		}
+	}
+
 	fallback := e.applyVisionFallback(auth, req, opts)
 	req = fallback.Request
 	if !fallback.Applied {
