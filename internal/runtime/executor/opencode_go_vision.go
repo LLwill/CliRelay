@@ -260,7 +260,6 @@ func opencodeGoPreprocessVision(ctx context.Context, cfg *config.Config, auth *c
 			if content.Exists() && content.IsArray() {
 				payload = processContentArray(i, content)
 			}
-			break // Only the last user message
 		}
 	}
 
@@ -304,7 +303,6 @@ func opencodeGoPreprocessVision(ctx context.Context, cfg *config.Config, auth *c
 					modified = true
 				}
 			}
-			break
 		}
 	}
 
