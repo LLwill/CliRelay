@@ -33,6 +33,28 @@ func TestParseOpenCodeGoUsageHTML(t *testing.T) {
 	}
 }
 
+func TestParseOpenCodeGoUsageHydrationHTML(t *testing.T) {
+	html := `<script>
+		rollingUsage:$R[1]={usagePercent:12.4,resetInSec:3720}
+		weeklyUsage:$R[2]={resetInSec:432000,usagePercent:34}
+		monthlyUsage:$R[3]={usagePercent:56,resetInSec:2505600}
+	</script>`
+
+	items := parseOpenCodeGoUsageHTML(html)
+	if len(items) != 3 {
+		t.Fatalf("usage item count = %d, want 3: %+v", len(items), items)
+	}
+	if items[0].Type != "rolling" || items[0].Percentage != 12 || items[0].ResetsIn != "1 hour 2 minutes" {
+		t.Fatalf("rolling item = %+v", items[0])
+	}
+	if items[1].Type != "weekly" || items[1].Percentage != 34 || items[1].ResetsIn != "5 days" {
+		t.Fatalf("weekly item = %+v", items[1])
+	}
+	if items[2].Type != "monthly" || items[2].Percentage != 56 || items[2].ResetsIn != "29 days" {
+		t.Fatalf("monthly item = %+v", items[2])
+	}
+}
+
 func TestNormalizeOpenCodeGoAuthCookie(t *testing.T) {
 	tests := map[string]string{
 		"token":                        "token",
@@ -129,6 +151,47 @@ func TestQueryOpenCodeGoUsageFetchesDashboard(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if decoded.WorkspaceID != "wrk_test" || len(decoded.Usage) != 3 || decoded.Usage[2].Percentage != 56 {
+		t.Fatalf("response = %+v", decoded)
+	}
+}
+
+func TestQueryOpenCodeGoUsageFetchesHydrationDashboard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspace/wrk_test/go" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html><script>
+			rollingUsage:$R[10]={usagePercent:7,resetInSec:120}
+			weeklyUsage:$R[11]={resetInSec:3600,usagePercent:8}
+			monthlyUsage:$R[12]={usagePercent:9,resetInSec:86400}
+		</script></html>`))
+	}))
+	defer upstream.Close()
+
+	prevBaseURL := openCodeGoConsoleBaseURL
+	openCodeGoConsoleBaseURL = upstream.URL
+	defer func() { openCodeGoConsoleBaseURL = prevBaseURL }()
+
+	h := &Handler{cfg: &config.Config{}}
+	body := []byte(`{"workspace-id":"wrk_test","auth-cookie":"token"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/opencode-go-api-key/usage", bytes.NewReader(body))
+
+	h.QueryOpenCodeGoUsage(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var decoded struct {
+		Usage []openCodeGoUsageItem `json:"usage"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(decoded.Usage) != 3 || decoded.Usage[0].Percentage != 7 || decoded.Usage[2].ResetsIn != "1 day" {
 		t.Fatalf("response = %+v", decoded)
 	}
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,8 +18,14 @@ import (
 )
 
 var (
-	openCodeGoConsoleBaseURL  = "https://opencode.ai"
-	openCodeGoUsagePattern    = regexp.MustCompile(`(?i)(Rolling|Weekly|Monthly)\s+Usage\s+([0-9]{1,3})%\s+Resets\s+in\s+`)
+	openCodeGoConsoleBaseURL = "https://opencode.ai"
+	openCodeGoUsagePattern   = regexp.MustCompile(`(?i)(Rolling|Weekly|Monthly)\s+Usage\s+([0-9]{1,3})%\s+Resets\s+in\s+`)
+	openCodeGoNumberPattern  = `(-?\d+(?:\.\d+)?)`
+	openCodeGoUsageWindows   = []openCodeGoUsageWindowPattern{
+		{usageType: "rolling", label: "Rolling", pctFirst: regexp.MustCompile(`rollingUsage:\$R\[\d+\]=\{[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*\}`), resetFirst: regexp.MustCompile(`rollingUsage:\$R\[\d+\]=\{[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*\}`)},
+		{usageType: "weekly", label: "Weekly", pctFirst: regexp.MustCompile(`weeklyUsage:\$R\[\d+\]=\{[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*\}`), resetFirst: regexp.MustCompile(`weeklyUsage:\$R\[\d+\]=\{[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*\}`)},
+		{usageType: "monthly", label: "Monthly", pctFirst: regexp.MustCompile(`monthlyUsage:\$R\[\d+\]=\{[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*\}`), resetFirst: regexp.MustCompile(`monthlyUsage:\$R\[\d+\]=\{[^}]*resetInSec:` + openCodeGoNumberPattern + `[^}]*usagePercent:` + openCodeGoNumberPattern + `[^}]*\}`)},
+	}
 	openCodeGoServerIDPattern = regexp.MustCompile(`(?i)^[a-f0-9]{64}$`)
 	openCodeGoTagPattern      = regexp.MustCompile(`(?s)<[^>]+>`)
 	openCodeGoSpacePattern    = regexp.MustCompile(`\s+`)
@@ -30,6 +38,13 @@ type openCodeGoUsageItem struct {
 	Label      string `json:"label"`
 	Percentage int    `json:"percentage"`
 	ResetsIn   string `json:"resets_in"`
+}
+
+type openCodeGoUsageWindowPattern struct {
+	usageType  string
+	label      string
+	pctFirst   *regexp.Regexp
+	resetFirst *regexp.Regexp
 }
 
 type openCodeGoUsageRequest struct {
@@ -244,6 +259,9 @@ func extractOpenCodeGoWorkspaceIDFromPath(path string) string {
 }
 
 func parseOpenCodeGoUsageHTML(body string) []openCodeGoUsageItem {
+	if items := parseOpenCodeGoHydrationUsage(body); len(items) > 0 {
+		return items
+	}
 	text := stripOpenCodeGoHTML(body)
 	matches := openCodeGoUsagePattern.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
@@ -271,6 +289,89 @@ func parseOpenCodeGoUsageHTML(body string) []openCodeGoUsageItem {
 		})
 	}
 	return items
+}
+
+func parseOpenCodeGoHydrationUsage(body string) []openCodeGoUsageItem {
+	items := make([]openCodeGoUsageItem, 0, len(openCodeGoUsageWindows))
+	for _, window := range openCodeGoUsageWindows {
+		percentage, resetInSec, ok := parseOpenCodeGoHydrationWindow(body, window)
+		if !ok {
+			continue
+		}
+		items = append(items, openCodeGoUsageItem{
+			Type:       window.usageType,
+			Label:      window.label,
+			Percentage: percentage,
+			ResetsIn:   formatOpenCodeGoResetIn(resetInSec),
+		})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+func parseOpenCodeGoHydrationWindow(body string, window openCodeGoUsageWindowPattern) (int, int64, bool) {
+	if match := window.pctFirst.FindStringSubmatch(body); len(match) == 3 {
+		percentage, resetInSec, ok := parseOpenCodeGoHydrationNumbers(match[1], match[2])
+		return percentage, resetInSec, ok
+	}
+	if match := window.resetFirst.FindStringSubmatch(body); len(match) == 3 {
+		percentage, resetInSec, ok := parseOpenCodeGoHydrationNumbers(match[2], match[1])
+		return percentage, resetInSec, ok
+	}
+	return 0, 0, false
+}
+
+func parseOpenCodeGoHydrationNumbers(usagePercentRaw, resetInSecRaw string) (int, int64, bool) {
+	usagePercent, err := strconv.ParseFloat(usagePercentRaw, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	resetInSec, err := strconv.ParseFloat(resetInSecRaw, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if usagePercent < 0 {
+		usagePercent = 0
+	}
+	if resetInSec < 0 {
+		resetInSec = 0
+	}
+	return int(math.Round(usagePercent)), int64(math.Round(resetInSec)), true
+}
+
+func formatOpenCodeGoResetIn(seconds int64) string {
+	duration := time.Duration(seconds) * time.Second
+	days := int(duration / (24 * time.Hour))
+	duration -= time.Duration(days) * 24 * time.Hour
+	hours := int(duration / time.Hour)
+	duration -= time.Duration(hours) * time.Hour
+	minutes := int(duration / time.Minute)
+	if days > 0 {
+		if hours > 0 {
+			return formatOpenCodeGoDurationPart(days, "day") + " " + formatOpenCodeGoDurationPart(hours, "hour")
+		}
+		return formatOpenCodeGoDurationPart(days, "day")
+	}
+	if hours > 0 {
+		if minutes > 0 {
+			return formatOpenCodeGoDurationPart(hours, "hour") + " " + formatOpenCodeGoDurationPart(minutes, "minute")
+		}
+		return formatOpenCodeGoDurationPart(hours, "hour")
+	}
+	if minutes > 0 {
+		return formatOpenCodeGoDurationPart(minutes, "minute")
+	}
+	return formatOpenCodeGoDurationPart(int(seconds), "second")
+}
+
+func formatOpenCodeGoDurationPart(value int, unit string) string {
+	suffix := unit
+	if value != 1 {
+		suffix += "s"
+	}
+	return strconv.Itoa(value) + " " + suffix
 }
 
 func stripOpenCodeGoHTML(body string) string {
