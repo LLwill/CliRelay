@@ -355,6 +355,143 @@ func modelConfigParamID(c *gin.Context) string {
 	return strings.TrimPrefix(strings.TrimSpace(c.Param("id")), "/")
 }
 
+// GetConfiguredModelAvailability returns the currently configured and serviceable
+// model IDs with pricing/metadata and active_metadata for owner/source filtering.
+//
+// Endpoint:
+//
+//	GET /v0/management/models/configured-availability
+func (h *Handler) GetConfiguredModelAvailability(c *gin.Context) {
+	modelRegistry := registry.GetGlobalRegistry()
+	allModels := modelRegistry.GetAvailableModels("openai")
+
+	// Parse optional channel/group filters (same param semantics as GetModels).
+	allowedRaw := strings.TrimSpace(c.Query("allowed_channels"))
+	if allowedRaw == "" {
+		allowedRaw = strings.TrimSpace(c.Query("allowed-channels"))
+	}
+	allowedGroupsRaw := strings.TrimSpace(c.Query("allowed_channel_groups"))
+	if allowedGroupsRaw == "" {
+		allowedGroupsRaw = strings.TrimSpace(c.Query("allowed-channel-groups"))
+	}
+	allowedGroups := internalrouting.ParseNormalizedSet(allowedGroupsRaw, internalrouting.NormalizeGroupName)
+
+	filterModels := func(models []map[string]any) []map[string]any {
+		if h == nil || h.authManager == nil {
+			return models
+		}
+		if allowedRaw != "" && allowedRaw != "*" && !strings.EqualFold(allowedRaw, "all") {
+			allowed := make(map[string]struct{})
+			for _, part := range strings.Split(allowedRaw, ",") {
+				key := strings.ToLower(strings.TrimSpace(part))
+				if key == "" {
+					continue
+				}
+				allowed[key] = struct{}{}
+			}
+			if len(allowed) > 0 {
+				filtered := make([]map[string]any, 0, len(models))
+				for _, model := range models {
+					id, _ := model["id"].(string)
+					if id == "" {
+						continue
+					}
+					if h.authManager.CanServeModelWithScopes(id, allowed, allowedGroups, "") {
+						filtered = append(filtered, model)
+					}
+				}
+				return filtered
+			}
+		}
+		if len(allowedGroups) > 0 {
+			filtered := make([]map[string]any, 0, len(models))
+			for _, model := range models {
+				id, _ := model["id"].(string)
+				if id == "" {
+					continue
+				}
+				if h.authManager.CanServeModelWithScopes(id, nil, allowedGroups, "") {
+					filtered = append(filtered, model)
+				}
+			}
+			return filtered
+		}
+		return models
+	}
+	allModels = filterModels(allModels)
+
+	// Build model config index for metadata/pricing.
+	allConfigRows := usage.ListModelConfigs()
+	configByID := make(map[string]usage.ModelConfigRow, len(allConfigRows))
+	for _, row := range allConfigRows {
+		configByID[strings.ToLower(strings.TrimSpace(row.ModelID))] = row
+	}
+
+	// Build data array with metadata from model configs.
+	type configuredModelEntry struct {
+		ID      string         `json:"id"`
+		OwnedBy string         `json:"owned_by,omitempty"`
+		Pricing map[string]any `json:"pricing,omitempty"`
+		Source  string         `json:"source"`
+	}
+
+	data := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
+		id, _ := model["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":     id,
+			"object": "model",
+			"source": "registry",
+		}
+		if ownedBy, exists := model["owned_by"]; exists {
+			entry["owned_by"] = ownedBy
+		}
+		if row, ok := configByID[strings.ToLower(id)]; ok {
+			attachModelConfigCapabilities(entry, row)
+			entry["pricing"] = map[string]any{
+				"mode":                     row.PricingMode,
+				"input_price_per_million":  row.InputPricePerMillion,
+				"output_price_per_million": row.OutputPricePerMillion,
+				"cached_price_per_million": row.CachedPricePerMillion,
+				"price_per_call":           row.PricePerCall,
+			}
+			if row.Description != "" {
+				entry["description"] = row.Description
+			}
+			if row.Source != "" {
+				entry["metadata_source"] = row.Source
+			}
+		}
+		data = append(data, entry)
+	}
+
+	// Determine scoped: true when auth manager is configured (provider configs exist).
+	scoped := h != nil && h.authManager != nil
+
+	// active_metadata: all user and seed model configs for owner/source filtering.
+	activeRows := filterModelConfigRowsByScope(allConfigRows, "active")
+	activeMetadata := make([]map[string]any, 0, len(activeRows))
+	for _, row := range activeRows {
+		activeMetadata = append(activeMetadata, map[string]any{
+			"id":        row.ModelID,
+			"owned_by":  row.OwnedBy,
+			"source":    row.Source,
+			"enabled":   row.Enabled,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"object":          "list",
+		"scoped":          scoped,
+		"data":            data,
+		"active_metadata": activeMetadata,
+	})
+}
+
 // GetModels returns the list of all available models from the global registry
 // along with their pricing information.
 //

@@ -656,6 +656,7 @@ func (s *Server) registerManagementRoutes() {
 			s.mgmt.SystemStatsWebSocket(c)
 		})
 		mgmt.GET("/models", s.mgmt.GetModels)
+		mgmt.GET("/models/configured-availability", s.mgmt.GetConfiguredModelAvailability)
 		mgmt.GET("/model-path-availability", s.mgmt.GetModelPathAvailability)
 		mgmt.GET("/model-configs", s.mgmt.GetModelConfigs)
 		mgmt.POST("/model-configs", s.mgmt.PostModelConfig)
