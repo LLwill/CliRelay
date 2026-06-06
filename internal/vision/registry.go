@@ -53,8 +53,10 @@ func (r *GlobalRegistry) GetOrCreateSession(key SessionKey) *SessionStore {
 		r.evictOldestSession()
 	}
 
+	now := time.Now()
 	s := &SessionStore{
-		entries: make(map[ImageHash]*ImageEntry),
+		entries:   make(map[ImageHash]*ImageEntry),
+		updatedAt: now,
 	}
 	r.sessions[key] = s
 	return s

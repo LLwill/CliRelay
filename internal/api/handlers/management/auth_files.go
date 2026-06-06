@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	oauthcallback "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/callback"
+	antigravityprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/antigravity"
 	claudeprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/claude"
 	codexprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/codex"
 	geminicli "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/geminicli"
@@ -1362,35 +1363,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			}
 		}
 
-		now := time.Now()
-		metadata := map[string]any{
-			"type":          "antigravity",
-			"access_token":  tokenResp.AccessToken,
-			"refresh_token": tokenResp.RefreshToken,
-			"expires_in":    tokenResp.ExpiresIn,
-			"timestamp":     now.UnixMilli(),
-			"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-		}
-		if email != "" {
-			metadata["email"] = email
-		}
-		if projectID != "" {
-			metadata["project_id"] = projectID
-		}
-
-		fileName := antigravity.CredentialFileName(email)
-		label := strings.TrimSpace(email)
-		if label == "" {
-			label = "antigravity"
-		}
-
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "antigravity",
-			FileName: fileName,
-			Label:    label,
-			Metadata: metadata,
-		}
+		record := antigravityprovider.RecordFromTokenResponse(tokenResp, email, projectID, time.Now())
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
