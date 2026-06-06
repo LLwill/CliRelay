@@ -3,7 +3,7 @@
     "allow_above_1200": [
       {
         "path": "internal/api/handlers/management/auth_files.go",
-        "max_lines": 2428,
+        "max_lines": 2286,
         "reason": "Phase 1 legacy management auth-files handler debt; move transport/use cases into internal/management/authfiles and oauth."
       },
       {

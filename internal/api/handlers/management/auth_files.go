@@ -9,15 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
+	oauthcallback "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/callback"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -59,17 +57,6 @@ const (
 	managementGeminiCLIErrorBodyLimit   int64 = 256 << 10
 )
 
-type callbackForwarder struct {
-	provider string
-	server   *http.Server
-	done     chan struct{}
-}
-
-var (
-	callbackForwardersMu sync.Mutex
-	callbackForwarders   = make(map[int]*callbackForwarder)
-)
-
 func isWebUIRequest(c *gin.Context) bool {
 	raw := strings.TrimSpace(c.Query("is_webui"))
 	if raw == "" {
@@ -81,135 +68,6 @@ func isWebUIRequest(c *gin.Context) bool {
 	default:
 		return false
 	}
-}
-
-func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
-	forwarder, _, err := startCallbackForwarderOnExactPort(port, provider, targetBase)
-	return forwarder, err
-}
-
-func startCallbackForwarderOnAvailablePort(preferredPort int, provider, targetBase string) (*callbackForwarder, int, error) {
-	forwarder, port, err := startCallbackForwarderOnExactPort(preferredPort, provider, targetBase)
-	if err == nil {
-		return forwarder, port, nil
-	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
-		return nil, 0, err
-	}
-	log.WithError(err).Warnf("callback forwarder for %s could not listen on preferred port %d, trying a free port", provider, preferredPort)
-	return startCallbackForwarderOnExactPort(0, provider, targetBase)
-}
-
-func startCallbackForwarderOnExactPort(port int, provider, targetBase string) (*callbackForwarder, int, error) {
-	callbackForwardersMu.Lock()
-	prev := callbackForwarders[port]
-	if prev != nil {
-		delete(callbackForwarders, port)
-	}
-	callbackForwardersMu.Unlock()
-
-	if prev != nil {
-		stopForwarderInstance(context.Background(), port, prev)
-	}
-
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to listen on %s: %w", addr, err)
-	}
-	actualPort := port
-	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && tcpAddr != nil {
-		actualPort = tcpAddr.Port
-	}
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target := targetBase
-		if raw := r.URL.RawQuery; raw != "" {
-			if strings.Contains(target, "?") {
-				target = target + "&" + raw
-			} else {
-				target = target + "?" + raw
-			}
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		http.Redirect(w, r, target, http.StatusFound)
-	})
-
-	srv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      5 * time.Second,
-	}
-	done := make(chan struct{})
-
-	go func() {
-		if errServe := srv.Serve(ln); errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
-			log.WithError(errServe).Warnf("callback forwarder for %s stopped unexpectedly", provider)
-		}
-		close(done)
-	}()
-
-	forwarder := &callbackForwarder{
-		provider: provider,
-		server:   srv,
-		done:     done,
-	}
-
-	callbackForwardersMu.Lock()
-	callbackForwarders[actualPort] = forwarder
-	callbackForwardersMu.Unlock()
-
-	log.Infof("callback forwarder for %s listening on %s", provider, ln.Addr().String())
-
-	return forwarder, actualPort, nil
-}
-
-func stopCallbackForwarder(port int) {
-	callbackForwardersMu.Lock()
-	forwarder := callbackForwarders[port]
-	if forwarder != nil {
-		delete(callbackForwarders, port)
-	}
-	callbackForwardersMu.Unlock()
-
-	stopForwarderInstance(context.Background(), port, forwarder)
-}
-
-func stopCallbackForwarderInstance(ctx context.Context, port int, forwarder *callbackForwarder) {
-	if forwarder == nil {
-		return
-	}
-	callbackForwardersMu.Lock()
-	if current := callbackForwarders[port]; current == forwarder {
-		delete(callbackForwarders, port)
-	}
-	callbackForwardersMu.Unlock()
-
-	stopForwarderInstance(ctx, port, forwarder)
-}
-
-func stopForwarderInstance(ctx context.Context, port int, forwarder *callbackForwarder) {
-	if forwarder == nil || forwarder.server == nil {
-		return
-	}
-
-	parentCtx := ctx
-	if parentCtx == nil {
-		parentCtx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
-	defer cancel()
-
-	if err := forwarder.server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.WithError(err).Warnf("failed to shut down callback forwarder on port %d", port)
-	}
-
-	select {
-	case <-forwarder.done:
-	case <-time.After(2 * time.Second):
-	}
-
-	log.Infof("callback forwarder on port %d stopped", port)
 }
 
 func (h *Handler) managementCallbackURL(path string) (string, error) {
@@ -895,7 +753,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	isWebUI := isWebUIRequest(c)
 	redirectURI := claude.RedirectURI
-	var forwarder *callbackForwarder
+	var forwarder *oauthcallback.Forwarder
 	callbackPort := anthropicCallbackPort
 	if isWebUI {
 		if targetURL, errTarget := h.managementCallbackURL("/anthropic/callback"); errTarget != nil {
@@ -903,7 +761,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			redirectURI = claude.PlatformRedirectURI
 		} else {
 			var errStart error
-			if forwarder, callbackPort, errStart = startCallbackForwarderOnAvailablePort(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
+			if forwarder, callbackPort, errStart = oauthcallback.StartOnAvailablePort(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
 				log.WithError(errStart).Warn("failed to start anthropic callback forwarder, falling back to Claude platform callback")
 				redirectURI = claude.PlatformRedirectURI
 			} else {
@@ -916,7 +774,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	authURL, state, err := anthropicAuth.GenerateAuthURLWithRedirectURI(state, pkceCodes, redirectURI)
 	if err != nil {
 		if forwarder != nil {
-			stopCallbackForwarderInstance(ctx, callbackPort, forwarder)
+			oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -927,7 +785,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	go func() {
 		if forwarder != nil {
-			defer stopCallbackForwarderInstance(ctx, callbackPort, forwarder)
+			defer oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 
 		// Helper: wait for callback file
@@ -1052,7 +910,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	RegisterOAuthSession(state, "gemini")
 
 	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
+	var forwarder *oauthcallback.Forwarder
 	callbackPort := geminiCallbackPort
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/google/callback")
@@ -1062,7 +920,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, callbackPort, errStart = startCallbackForwarderOnAvailablePort(geminiCallbackPort, "gemini", targetURL); errStart != nil {
+		if forwarder, callbackPort, errStart = oauthcallback.StartOnAvailablePort(geminiCallbackPort, "gemini", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start gemini callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1075,7 +933,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(ctx, callbackPort, forwarder)
+			defer oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 
 		// Wait for callback file written by server route
@@ -1330,14 +1188,14 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	RegisterOAuthSession(state, "codex")
 
 	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
+	var forwarder *oauthcallback.Forwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Warn("failed to compute codex callback target; continuing with manual callback submission")
 		} else {
 			var errStart error
-			if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+			if forwarder, errStart = oauthcallback.Start(codexCallbackPort, "codex", targetURL); errStart != nil {
 				log.WithError(errStart).Warn("failed to start codex callback forwarder; continuing with manual callback submission")
 			}
 		}
@@ -1345,7 +1203,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	go func() {
 		if forwarder != nil {
-			defer stopCallbackForwarderInstance(ctx, codexCallbackPort, forwarder)
+			defer oauthcallback.StopInstance(ctx, codexCallbackPort, forwarder)
 		}
 
 		// Wait for callback file
@@ -1453,7 +1311,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	}
 
 	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
+	var forwarder *oauthcallback.Forwarder
 	callbackPort := antigravity.CallbackPort
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
@@ -1463,7 +1321,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, callbackPort, errStart = startCallbackForwarderOnAvailablePort(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+		if forwarder, callbackPort, errStart = oauthcallback.StartOnAvailablePort(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1474,7 +1332,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 	if strings.TrimSpace(authURL) == "" {
 		if isWebUI {
-			stopCallbackForwarderInstance(ctx, callbackPort, forwarder)
+			oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "antigravity oauth client-id not configured"})
 		return
@@ -1484,7 +1342,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(ctx, callbackPort, forwarder)
+			defer oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
@@ -1753,7 +1611,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	RegisterOAuthSession(state, "iflow")
 
 	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
+	var forwarder *oauthcallback.Forwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/iflow/callback")
 		if errTarget != nil {
@@ -1762,7 +1620,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(iflowauth.CallbackPort, "iflow", targetURL); errStart != nil {
+		if forwarder, errStart = oauthcallback.Start(iflowauth.CallbackPort, "iflow", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start iflow callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to start callback server"})
 			return
@@ -1771,7 +1629,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(ctx, iflowauth.CallbackPort, forwarder)
+			defer oauthcallback.StopInstance(ctx, iflowauth.CallbackPort, forwarder)
 		}
 		fmt.Println("Waiting for authentication...")
 
