@@ -8,6 +8,60 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+func TestApplyStatusPatchDisablesAuth(t *testing.T) {
+	now := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+	auth := &coreauth.Auth{ID: "codex", Status: coreauth.StatusActive}
+
+	if err := ApplyStatusPatch(auth, true, now); err != nil {
+		t.Fatalf("ApplyStatusPatch() error = %v", err)
+	}
+	if !auth.Disabled {
+		t.Fatal("Disabled = false, want true")
+	}
+	if auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("Status = %q, want %q", auth.Status, coreauth.StatusDisabled)
+	}
+	if auth.StatusMessage != "disabled via management API" {
+		t.Fatalf("StatusMessage = %q, want disabled message", auth.StatusMessage)
+	}
+	if !auth.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt = %v, want %v", auth.UpdatedAt, now)
+	}
+}
+
+func TestApplyStatusPatchEnablesAuth(t *testing.T) {
+	now := time.Date(2026, 6, 6, 11, 0, 0, 0, time.UTC)
+	auth := &coreauth.Auth{
+		ID:            "codex",
+		Disabled:      true,
+		Status:        coreauth.StatusDisabled,
+		StatusMessage: "disabled via management API",
+	}
+
+	if err := ApplyStatusPatch(auth, false, now); err != nil {
+		t.Fatalf("ApplyStatusPatch() error = %v", err)
+	}
+	if auth.Disabled {
+		t.Fatal("Disabled = true, want false")
+	}
+	if auth.Status != coreauth.StatusActive {
+		t.Fatalf("Status = %q, want %q", auth.Status, coreauth.StatusActive)
+	}
+	if auth.StatusMessage != "" {
+		t.Fatalf("StatusMessage = %q, want empty", auth.StatusMessage)
+	}
+	if !auth.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt = %v, want %v", auth.UpdatedAt, now)
+	}
+}
+
+func TestApplyStatusPatchRejectsMissingAuth(t *testing.T) {
+	err := ApplyStatusPatch(nil, true, time.Time{})
+	if err == nil || err.Error() != "auth file not found" {
+		t.Fatalf("ApplyStatusPatch() error = %v, want not found", err)
+	}
+}
+
 func TestApplyFieldPatchUpdatesOAuthLabel(t *testing.T) {
 	now := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
 	auth := &coreauth.Auth{

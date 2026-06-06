@@ -35,6 +35,25 @@ type FieldPatchResult struct {
 	NewChannelLabel       string
 }
 
+func ApplyStatusPatch(auth *coreauth.Auth, disabled bool, now time.Time) error {
+	if auth == nil {
+		return fmt.Errorf("auth file not found")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	auth.Disabled = disabled
+	if disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "disabled via management API"
+	} else {
+		auth.Status = coreauth.StatusActive
+		auth.StatusMessage = ""
+	}
+	auth.UpdatedAt = now
+	return nil
+}
+
 // ApplyFieldPatch applies editable auth-file field changes and returns the
 // channel rename side effect that the transport layer must coordinate.
 func ApplyFieldPatch(auth *coreauth.Auth, patch FieldPatch, opts FieldPatchOptions) (FieldPatchResult, error) {

@@ -45,7 +45,7 @@ docs/internal-review/backend-structure-allowlist.json
 
 | 文件 | 行数 | 治理阶段 |
 | --- | ---: | --- |
-| `internal/api/handlers/management/auth_files.go` | 1503 | Phase 1 |
+| `internal/api/handlers/management/auth_files.go` | 1497 | Phase 1 |
 | `sdk/cliproxy/auth/conductor.go` | 3223 | Phase 5 |
 | `internal/usage/usage_db.go` | 2530 | Phase 3 |
 | `internal/api/handlers/management/config_lists.go` | 2307 | Phase 1/2 |

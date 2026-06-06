@@ -451,16 +451,10 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	// Update disabled state
-	targetAuth.Disabled = *req.Disabled
-	if *req.Disabled {
-		targetAuth.Status = coreauth.StatusDisabled
-		targetAuth.StatusMessage = "disabled via management API"
-	} else {
-		targetAuth.Status = coreauth.StatusActive
-		targetAuth.StatusMessage = ""
+	if errPatch := managementauthfiles.ApplyStatusPatch(targetAuth, *req.Disabled, time.Now()); errPatch != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPatch.Error()})
+		return
 	}
-	targetAuth.UpdatedAt = time.Now()
 
 	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
