@@ -484,9 +484,9 @@ func TestBuildAuthFileEntryIncludesActiveRestrictions(t *testing.T) {
 	if entry == nil {
 		t.Fatal("expected auth file entry")
 	}
-	restrictions, ok := entry["restrictions"].([]gin.H)
+	restrictions, ok := entry["restrictions"].([]map[string]any)
 	if !ok {
-		t.Fatalf("restrictions type = %T, want []gin.H", entry["restrictions"])
+		t.Fatalf("restrictions type = %T, want []map[string]any", entry["restrictions"])
 	}
 	if len(restrictions) != 1 {
 		t.Fatalf("restrictions length = %d, want 1", len(restrictions))
@@ -552,9 +552,9 @@ func TestBuildAuthFileEntryDedupesDuplicateRestrictions(t *testing.T) {
 	if entry == nil {
 		t.Fatal("expected auth file entry")
 	}
-	restrictions, ok := entry["restrictions"].([]gin.H)
+	restrictions, ok := entry["restrictions"].([]map[string]any)
 	if !ok {
-		t.Fatalf("restrictions type = %T, want []gin.H", entry["restrictions"])
+		t.Fatalf("restrictions type = %T, want []map[string]any", entry["restrictions"])
 	}
 	if len(restrictions) != 1 {
 		t.Fatalf("restrictions length = %d, want 1", len(restrictions))
