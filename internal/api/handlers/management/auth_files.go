@@ -1412,24 +1412,14 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		}
 		fmt.Println("Waiting for authentication...")
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
-		deadline := time.Now().Add(oauthCallbackWaitTimeout)
-		var resultMap map[string]string
-		for {
-			if !IsOAuthSessionPending(state, "iflow") {
+		resultMap, errWait := WaitOAuthCallbackFile(h.cfg.AuthDir, "iflow", state, oauthCallbackWaitTimeout)
+		if errWait != nil {
+			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return
 			}
-			if time.Now().After(deadline) {
-				SetOAuthSessionError(state, "Authentication failed")
-				fmt.Println("Authentication failed: timeout waiting for callback")
-				return
-			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
-				_ = os.Remove(waitFile)
-				_ = json.Unmarshal(data, &resultMap)
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Println("Authentication failed: timeout waiting for callback")
+			return
 		}
 
 		if errStr := strings.TrimSpace(resultMap["error"]); errStr != "" {
