@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	ampsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/amp"
+	apikeysettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/apikey"
 	oauthsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/oauth"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -30,6 +32,13 @@ func (h *Handler) refreshAPIKeyCache() {
 	if h.accessManager != nil {
 		_, _ = access.ApplyAccessProviders(h.accessManager, nil, h.cfg)
 	}
+}
+
+func (h *Handler) apiKeySettings() *apikeysettings.Service {
+	if h == nil {
+		return apikeysettings.NewService(nil)
+	}
+	return apikeysettings.NewService(h.sanitizeAllowedChannelsForSave)
 }
 
 // Generic helpers for list[string]
@@ -129,14 +138,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys (legacy simple list — now backed by SQLite)
 func (h *Handler) GetAPIKeys(c *gin.Context) {
-	rows := usage.ListAPIKeys()
-	keys := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if !r.Disabled {
-			keys = append(keys, r.Key)
-		}
-	}
-	c.JSON(200, gin.H{"api-keys": keys})
+	c.JSON(200, gin.H{"api-keys": h.apiKeySettings().EnabledKeys()})
 }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	data, err := c.GetRawData()
@@ -155,14 +157,7 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	var rows []usage.APIKeyRow
-	for _, k := range arr {
-		trimmed := strings.TrimSpace(k)
-		if trimmed != "" {
-			rows = append(rows, usage.APIKeyRow{Key: trimmed})
-		}
-	}
-	if err := usage.ReplaceAllAPIKeys(rows); err != nil {
+	if err := h.apiKeySettings().ReplaceKeys(arr); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -178,35 +173,28 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	oldKey := strings.TrimSpace(*body.Old)
-	newKey := strings.TrimSpace(*body.New)
-	if oldKey != "" {
-		_ = usage.DeleteAPIKey(oldKey)
-	}
-	if newKey != "" {
-		if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: newKey}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	if err := h.apiKeySettings().PatchKey(*body.Old, *body.New); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	h.refreshAPIKeyCache()
 	c.JSON(200, gin.H{"status": "ok"})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	if val := strings.TrimSpace(c.Query("value")); val != "" {
-		if err := usage.DeleteAPIKey(val); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err := h.apiKeySettings().DeleteKey(c.Query("value")); err != nil {
+		if errors.Is(err, apikeysettings.ErrMissingValue) {
+			c.JSON(400, gin.H{"error": "missing value"})
 			return
 		}
-		h.refreshAPIKeyCache()
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(400, gin.H{"error": "missing value"})
+	h.refreshAPIKeyCache()
+	c.JSON(200, gin.H{"status": "ok"})
 }
 
 func (h *Handler) GetAPIKeyPermissionProfiles(c *gin.Context) {
-	profiles := usage.ListAPIKeyPermissionProfiles()
+	profiles := h.apiKeySettings().PermissionProfiles()
 	c.JSON(200, gin.H{
 		"api-key-permission-profiles": profiles,
 		"items":                       profiles,
@@ -232,26 +220,7 @@ func (h *Handler) PutAPIKeyPermissionProfiles(c *gin.Context) {
 		profiles = obj.Items
 	}
 
-	for idx := range profiles {
-		profiles[idx].ID = strings.TrimSpace(profiles[idx].ID)
-		profiles[idx].Name = strings.TrimSpace(profiles[idx].Name)
-		if profiles[idx].ID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
-			return
-		}
-		if profiles[idx].Name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
-			return
-		}
-		if cleaned, errClean := h.sanitizeAllowedChannelsForSave(profiles[idx].AllowedChannels); errClean != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errClean.Error()})
-			return
-		} else {
-			profiles[idx].AllowedChannels = cleaned
-		}
-	}
-
-	if err := usage.ReplaceAllAPIKeyPermissionProfiles(profiles); err != nil {
+	if err := h.apiKeySettings().ReplacePermissionProfiles(profiles); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
