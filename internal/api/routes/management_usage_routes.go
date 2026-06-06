@@ -12,6 +12,7 @@ func registerManagementUsageRoutes(group *gin.RouterGroup, h *managementhandlers
 	group.GET("/usage/logs", h.GetUsageLogs)
 	group.DELETE("/usage/logs", h.DeleteUsageLogs)
 	group.GET("/usage/logs/:id/content", h.GetLogContent)
+	group.GET("/usage/logs/:id/egress", h.GetUsageLogEgress)
 	group.GET("/usage/auth-file-group-trend", h.GetAuthFileGroupTrend)
 	group.GET("/usage/auth-file-trend", h.GetAuthFileTrend)
 	group.POST("/usage/auth-file-quota-snapshot", h.PostAuthFileQuotaSnapshot)

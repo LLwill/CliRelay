@@ -386,6 +386,9 @@ func buildRequestDetailContent(ctx context.Context) string {
 			"upstream_log": bytesToString(apiResponse),
 		},
 	}
+	if egress := requestLogEgressFromContext(ginCtx); len(egress) > 0 {
+		detail["egress"] = egress
+	}
 
 	data, err := json.Marshal(detail)
 	if err != nil {
@@ -417,6 +420,41 @@ func bytesToString(value any) string {
 		return ""
 	}
 	return string(data)
+}
+
+func requestLogEgressFromContext(ginCtx *gin.Context) map[string]any {
+	if ginCtx == nil {
+		return nil
+	}
+	value, exists := ginCtx.Get(requestLogEgressRouteKey)
+	if !exists {
+		return nil
+	}
+	route, ok := value.(requestLogEgressRoute)
+	if !ok {
+		return nil
+	}
+
+	result := map[string]any{}
+	if route.RouteKind != "" {
+		result["route_kind"] = route.RouteKind
+	}
+	if route.ProxySource != "" {
+		result["proxy_source"] = route.ProxySource
+	}
+	if route.ProxyID != "" {
+		result["proxy_id"] = route.ProxyID
+	}
+	if route.ProxyName != "" {
+		result["proxy_name"] = route.ProxyName
+	}
+	if route.ProxyURLHost != "" {
+		result["proxy_url_host"] = route.ProxyURLHost
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func cloneHeaderValues(headers http.Header) map[string][]string {
