@@ -254,3 +254,121 @@ func TestCodexKeysReplacePatchDeleteAndRollback(t *testing.T) {
 		t.Fatalf("CodexKey after delete = %#v, want empty", cfg.CodexKey)
 	}
 }
+
+func TestBedrockKeysReplacePatchAndDelete(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewService(cfg, nil)
+
+	err := svc.ReplaceBedrockKeys([]config.BedrockKey{
+		{
+			Name:            " aws api ",
+			AuthMode:        "api-key",
+			APIKey:          " br-key ",
+			Region:          " eu-west-1 ",
+			SecretAccessKey: "should-trim",
+			Models:          []config.BedrockModel{{Name: " claude-sonnet-4-5 ", Alias: " aws-sonnet "}},
+		},
+		{
+			Name:            " aws sigv4 ",
+			AuthMode:        "sigv4",
+			AccessKeyID:     " AKIA ",
+			SecretAccessKey: " SECRET ",
+			Region:          " us-east-1 ",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceBedrockKeys() error = %v, want nil", err)
+	}
+	if len(cfg.BedrockKey) != 2 {
+		t.Fatalf("BedrockKey len = %d, want 2", len(cfg.BedrockKey))
+	}
+	if got := cfg.BedrockKey[0]; got.Name != "aws api" || got.APIKey != "br-key" || got.Region != "eu-west-1" {
+		t.Fatalf("normalized bedrock key = %#v", got)
+	}
+
+	match := "AKIA"
+	renamed := "renamed sigv4"
+	region := "ap-southeast-2"
+	sessionToken := "SESSION"
+	err = svc.PatchBedrockKey(nil, &match, BedrockKeyPatch{
+		Name:         &renamed,
+		Region:       &region,
+		SessionToken: &sessionToken,
+	})
+	if err != nil {
+		t.Fatalf("PatchBedrockKey() error = %v, want nil", err)
+	}
+	if got := cfg.BedrockKey[1]; got.Name != "renamed sigv4" || got.Region != "ap-southeast-2" || got.SessionToken != "SESSION" {
+		t.Fatalf("patched bedrock key = %#v", got)
+	}
+
+	if !svc.DeleteBedrockKeyByIndex(0) {
+		t.Fatal("DeleteBedrockKeyByIndex() = false, want true")
+	}
+	if len(cfg.BedrockKey) != 1 || cfg.BedrockKey[0].Name != "renamed sigv4" {
+		t.Fatalf("BedrockKey after delete = %#v", cfg.BedrockKey)
+	}
+}
+
+func TestOpenCodeGoKeysReplacePatchDeleteAndRollback(t *testing.T) {
+	validationErr := errors.New("channel conflict")
+	cfg := &config.Config{
+		OpenCodeGoKey: []config.OpenCodeGoKey{{APIKey: "existing"}},
+	}
+	svc := NewService(cfg, func() error { return validationErr })
+
+	err := svc.ReplaceOpenCodeGoKeys([]config.OpenCodeGoKey{{APIKey: " go-key "}})
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("ReplaceOpenCodeGoKeys() error = %v, want validation error", err)
+	}
+	if got := cfg.OpenCodeGoKey; len(got) != 1 || got[0].APIKey != "existing" {
+		t.Fatalf("OpenCodeGoKey after rollback = %#v, want existing entry", got)
+	}
+
+	svc = NewService(cfg, nil)
+	err = svc.ReplaceOpenCodeGoKeys([]config.OpenCodeGoKey{{
+		APIKey:              " go-key ",
+		Name:                " primary ",
+		Prefix:              " team ",
+		Headers:             map[string]string{"X-Test": " yes "},
+		VisionFallbackModel: " qwen3.5-plus ",
+		WorkspaceID:         " wrk_123 ",
+		AuthCookie:          " auth-token ",
+	}})
+	if err != nil {
+		t.Fatalf("ReplaceOpenCodeGoKeys() error = %v, want nil", err)
+	}
+	if len(cfg.OpenCodeGoKey) != 1 {
+		t.Fatalf("OpenCodeGoKey len = %d, want 1", len(cfg.OpenCodeGoKey))
+	}
+	if got := cfg.OpenCodeGoKey[0]; got.APIKey != "go-key" || got.Prefix != "team" || got.WorkspaceID != "wrk_123" || got.AuthCookie != "auth-token" {
+		t.Fatalf("normalized opencode go key = %#v", got)
+	}
+
+	index := 0
+	name := "secondary"
+	excludedModels := []string{" minimax-m2.5 "}
+	visionFallback := " qwen3.6-plus "
+	workspaceID := " https://opencode.ai/workspace/wrk_456/go "
+	authCookie := " auth-next "
+	err = svc.PatchOpenCodeGoKey(&index, nil, nil, OpenCodeGoPatch{
+		Name:           &name,
+		ExcludedModels: &excludedModels,
+		VisionFallback: &visionFallback,
+		WorkspaceID:    &workspaceID,
+		AuthCookie:     &authCookie,
+	})
+	if err != nil {
+		t.Fatalf("PatchOpenCodeGoKey() error = %v, want nil", err)
+	}
+	if got := cfg.OpenCodeGoKey[0]; got.Name != "secondary" || !reflect.DeepEqual(got.ExcludedModels, []string{"minimax-m2.5"}) || got.WorkspaceID != "wrk_456" || got.AuthCookie != "auth-next" {
+		t.Fatalf("patched opencode go key = %#v", got)
+	}
+
+	if !svc.DeleteOpenCodeGoKeyByName("secondary") {
+		t.Fatal("DeleteOpenCodeGoKeyByName() = false, want true")
+	}
+	if len(cfg.OpenCodeGoKey) != 0 {
+		t.Fatalf("OpenCodeGoKey after delete = %#v, want empty", cfg.OpenCodeGoKey)
+	}
+}
