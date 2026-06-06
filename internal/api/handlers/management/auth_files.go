@@ -109,44 +109,8 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		return
 	}
 
-	// Try to find auth ID via authManager
-	var authID string
-	if h.authManager != nil {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
-			}
-		}
-	}
-
-	if authID == "" {
-		authID = name // fallback to filename as ID
-	}
-
-	// Get models from registry
-	reg := registry.GetGlobalRegistry()
-	models := reg.GetModelsForClient(authID)
-
-	result := make([]gin.H, 0, len(models))
-	for _, m := range models {
-		entry := gin.H{
-			"id": m.ID,
-		}
-		if m.DisplayName != "" {
-			entry["display_name"] = m.DisplayName
-		}
-		if m.Type != "" {
-			entry["type"] = m.Type
-		}
-		if m.OwnedBy != "" {
-			entry["owned_by"] = m.OwnedBy
-		}
-		result = append(result, entry)
-	}
-
-	c.JSON(200, gin.H{"models": result})
+	models := managementauthfiles.ListModelEntries(h.authManager, registry.GetGlobalRegistry(), name)
+	c.JSON(200, gin.H{"models": models})
 }
 
 // List auth files from disk when the auth manager is unavailable.
