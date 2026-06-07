@@ -329,17 +329,10 @@ func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	cfg := h.cfg
 	mutated := h.onConfigMutated
-	if usage.ConfigStoreAvailable() {
-		settingsstore.PersistRuntimeSettingsFromConfig(cfg)
-	}
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, cfg); err != nil {
+	if err := settingsstore.SaveConfig(cfg, h.configFilePath); err != nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
-	}
-	if usage.ConfigStoreAvailable() {
-		usage.CleanDBBackedConfigFromYAML(h.configFilePath)
 	}
 	h.mu.Unlock()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -350,15 +343,9 @@ func (h *Handler) persist(c *gin.Context) bool {
 }
 
 func (h *Handler) persistRuntimeSetting(c *gin.Context, key string, value any) bool {
-	if !usage.ConfigStoreAvailable() {
-		return h.persist(c)
-	}
-	if err := settingsstore.UpsertRuntimeSetting(key, value); err != nil {
+	if err := settingsstore.PersistRuntimeSetting(h.cfg, h.configFilePath, key, value); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save runtime setting: %v", err)})
 		return false
-	}
-	if strings.TrimSpace(h.configFilePath) != "" {
-		usage.CleanDBBackedConfigFromYAML(h.configFilePath)
 	}
 	cfg := h.cfg
 	if h.authManager != nil {
@@ -369,6 +356,16 @@ func (h *Handler) persistRuntimeSetting(c *gin.Context, key string, value any) b
 		h.onConfigMutated(cfg)
 	}
 	return true
+}
+
+func (h *Handler) saveConfigFile() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return settingsstore.SaveConfig(h.cfg, h.configFilePath)
+}
+
+func (h *Handler) storeRuntimeSetting(key string, value any) error {
+	return settingsstore.PersistRuntimeSetting(h.cfg, h.configFilePath, key, value)
 }
 
 // Helper methods for simple types

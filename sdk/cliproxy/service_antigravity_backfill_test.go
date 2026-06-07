@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -41,7 +40,7 @@ func TestBackfillAntigravityModels_RegistersMissingAuth(t *testing.T) {
 		coreManager: manager,
 	}
 
-	reg := registry.GetGlobalRegistry()
+	reg := GlobalModelRegistry()
 	reg.UnregisterClient(source.ID)
 	reg.UnregisterClient(target.ID)
 	t.Cleanup(func() {
@@ -109,7 +108,7 @@ func TestBackfillAntigravityModels_RespectsExcludedModels(t *testing.T) {
 		coreManager: manager,
 	}
 
-	reg := registry.GetGlobalRegistry()
+	reg := GlobalModelRegistry()
 	reg.UnregisterClient(source.ID)
 	reg.UnregisterClient(target.ID)
 	t.Cleanup(func() {

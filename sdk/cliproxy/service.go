@@ -5,22 +5,12 @@ package cliproxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -60,7 +50,7 @@ type Service struct {
 	server *api.Server
 
 	// pprofServer manages the optional pprof HTTP debug server.
-	pprofServer *pprofServer
+	pprofServer pprofRuntime
 
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
@@ -72,7 +62,7 @@ type Service struct {
 	watcherCancel context.CancelFunc
 
 	// authUpdates channel for authentication updates.
-	authUpdates chan watcher.AuthUpdate
+	authUpdates chan runtimeAuthUpdate
 
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
@@ -93,1696 +83,265 @@ type Service struct {
 	shutdownOnce sync.Once
 
 	// wsGateway manages websocket Gemini providers.
-	wsGateway *wsrelay.Manager
+	wsGateway websocketGateway
 }
 
-// RegisterUsagePlugin registers a usage plugin on the global usage manager.
-// This allows external code to monitor API usage and token consumption.
-//
-// Parameters:
-//   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+// Builder constructs a Service instance with customizable providers.
+// It provides a fluent interface for configuring all aspects of the service
+// including authentication, file watching, HTTP server options, and lifecycle hooks.
+type Builder struct {
+	// cfg holds the application configuration.
+	cfg *config.Config
+
+	// configPath is the path to the configuration file.
+	configPath string
+
+	// tokenProvider handles loading token-based clients.
+	tokenProvider TokenClientProvider
+
+	// apiKeyProvider handles loading API key-based clients.
+	apiKeyProvider APIKeyClientProvider
+
+	// watcherFactory creates file watcher instances.
+	watcherFactory WatcherFactory
+
+	// hooks provides lifecycle callbacks.
+	hooks Hooks
+
+	// authManager handles legacy authentication operations.
+	authManager *sdkAuth.Manager
+
+	// accessManager handles request authentication providers.
+	accessManager *sdkaccess.Manager
+
+	// coreManager handles core authentication and execution.
+	coreManager *coreauth.Manager
+
+	// serverOptions contains additional server configuration options.
+	serverOptions []api.ServerOption
 }
 
-// newDefaultAuthManager creates a default authentication manager with all supported providers.
-func newDefaultAuthManager() *sdkAuth.Manager {
-	return sdkAuth.NewManager(
-		sdkAuth.GetTokenStore(),
-		sdkAuth.NewGeminiAuthenticator(),
-		sdkAuth.NewCodexAuthenticator(),
-		sdkAuth.NewClaudeAuthenticator(),
-		sdkAuth.NewQwenAuthenticator(),
-	)
+// Hooks allows callers to plug into service lifecycle stages.
+// These callbacks provide opportunities to perform custom initialization
+// and cleanup operations during service startup and shutdown.
+type Hooks struct {
+	// OnBeforeStart is called before the service starts, allowing configuration
+	// modifications or additional setup.
+	OnBeforeStart func(*config.Config)
+
+	// OnAfterStart is called after the service has started successfully,
+	// providing access to the service instance for additional operations.
+	OnAfterStart func(*Service)
 }
 
-func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
-	if s == nil {
-		return
+// NewBuilder creates a Builder with default dependencies left unset.
+// Use the fluent interface methods to configure the service before calling Build().
+func NewBuilder() *Builder {
+	return &Builder{}
+}
+
+// WithConfig sets the configuration instance used by the service.
+func (b *Builder) WithConfig(cfg *config.Config) *Builder {
+	b.cfg = cfg
+	return b
+}
+
+// WithConfigPath sets the absolute configuration file path used for reload watching.
+func (b *Builder) WithConfigPath(path string) *Builder {
+	b.configPath = path
+	return b
+}
+
+// WithTokenClientProvider overrides the provider responsible for token-backed clients.
+func (b *Builder) WithTokenClientProvider(provider TokenClientProvider) *Builder {
+	b.tokenProvider = provider
+	return b
+}
+
+// WithAPIKeyClientProvider overrides the provider responsible for API key-backed clients.
+func (b *Builder) WithAPIKeyClientProvider(provider APIKeyClientProvider) *Builder {
+	b.apiKeyProvider = provider
+	return b
+}
+
+// WithWatcherFactory allows customizing the watcher factory that handles reloads.
+func (b *Builder) WithWatcherFactory(factory WatcherFactory) *Builder {
+	b.watcherFactory = factory
+	return b
+}
+
+// WithHooks registers lifecycle hooks executed around service startup.
+func (b *Builder) WithHooks(h Hooks) *Builder {
+	b.hooks = h
+	return b
+}
+
+// WithAuthManager overrides the authentication manager used for token lifecycle operations.
+func (b *Builder) WithAuthManager(mgr *sdkAuth.Manager) *Builder {
+	b.authManager = mgr
+	return b
+}
+
+// WithRequestAccessManager overrides the request authentication manager.
+func (b *Builder) WithRequestAccessManager(mgr *sdkaccess.Manager) *Builder {
+	b.accessManager = mgr
+	return b
+}
+
+// WithCoreAuthManager overrides the runtime auth manager responsible for request execution.
+func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
+	b.coreManager = mgr
+	return b
+}
+
+// WithServerOptions appends server configuration options used during construction.
+func (b *Builder) WithServerOptions(opts ...api.ServerOption) *Builder {
+	b.serverOptions = append(b.serverOptions, opts...)
+	return b
+}
+
+// WithLocalManagementPassword configures a password that is only accepted from localhost management requests.
+func (b *Builder) WithLocalManagementPassword(password string) *Builder {
+	if password == "" {
+		return b
 	}
-	if s.authUpdates == nil {
-		s.authUpdates = make(chan watcher.AuthUpdate, 256)
-	}
-	if s.authQueueStop != nil {
-		return
-	}
-	queueCtx, cancel := context.WithCancel(ctx)
-	s.authQueueStop = cancel
-	s.authQueueWG.Add(1)
-	go func() {
-		defer s.authQueueWG.Done()
-		s.consumeAuthUpdates(queueCtx)
-	}()
+	b.serverOptions = append(b.serverOptions, api.WithLocalManagementPassword(password))
+	return b
 }
 
-func (s *Service) consumeAuthUpdates(ctx context.Context) {
-	ctx = coreauth.WithSkipPersist(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case update, ok := <-s.authUpdates:
-			if !ok {
-				return
-			}
-			s.handleAuthUpdate(ctx, update)
-		labelDrain:
-			for {
-				select {
-				case nextUpdate := <-s.authUpdates:
-					s.handleAuthUpdate(ctx, nextUpdate)
-				default:
-					break labelDrain
-				}
-			}
+// WithPostAuthHook registers a hook to be called after an Auth record is created
+// but before it is persisted to storage.
+func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
+	if hook == nil {
+		return b
+	}
+	b.serverOptions = append(b.serverOptions, api.WithPostAuthHook(hook))
+	return b
+}
+
+// Build validates inputs, applies defaults, and returns a ready-to-run service.
+func (b *Builder) Build() (*Service, error) {
+	if b.cfg == nil {
+		return nil, fmt.Errorf("cliproxy: configuration is required")
+	}
+	if b.configPath == "" {
+		return nil, fmt.Errorf("cliproxy: configuration path is required")
+	}
+
+	tokenProvider := b.tokenProvider
+	if tokenProvider == nil {
+		tokenProvider = NewFileTokenClientProvider()
+	}
+
+	apiKeyProvider := b.apiKeyProvider
+	if apiKeyProvider == nil {
+		apiKeyProvider = NewAPIKeyClientProvider()
+	}
+
+	watcherFactory := b.watcherFactory
+	if watcherFactory == nil {
+		watcherFactory = defaultWatcherFactory
+	}
+
+	authManager := b.authManager
+	if authManager == nil {
+		authManager = newDefaultAuthManager()
+	}
+
+	accessManager := b.accessManager
+	if accessManager == nil {
+		accessManager = sdkaccess.NewManager()
+	}
+	accessManager.SetAllowAllWhenNoProviders(b.cfg.SDKConfig.AllowUnauthenticated)
+	if b.cfg.SDKConfig.AllowUnauthenticated {
+		log.Warn("security warning: allow-unauthenticated is enabled; /v1 and /v1beta will be publicly accessible when no API keys are configured")
+	}
+
+	configureServiceAccess(b.cfg, accessManager)
+
+	coreManager := b.coreManager
+	if coreManager == nil {
+		tokenStore := sdkAuth.GetTokenStore()
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
+			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
-	}
-}
 
-func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
-	if s == nil {
-		return
-	}
-	if ctx == nil {
-		// Service-originated updates (for example websocket provider lifecycle events)
-		// may be emitted outside any request scope. In that case the service owns a
-		// detached root context and the downstream auth-update queue provides the
-		// bounded handoff/cleanup behavior.
-		ctx = context.Background()
-	}
-	if s.watcher != nil && s.watcher.DispatchRuntimeAuthUpdate(update) {
-		return
-	}
-	if s.authUpdates != nil {
-		select {
-		case s.authUpdates <- update:
-			return
-		default:
-			log.Debugf("auth update queue saturated, applying inline action=%v id=%s", update.Action, update.ID)
+		strategy := ""
+		if b.cfg != nil {
+			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
 		}
-	}
-	s.handleAuthUpdate(ctx, update)
-}
-
-func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
-	if s == nil {
-		return
-	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-	if cfg == nil || s.coreManager == nil {
-		return
-	}
-	switch update.Action {
-	case watcher.AuthUpdateActionAdd, watcher.AuthUpdateActionModify:
-		if update.Auth == nil || update.Auth.ID == "" {
-			return
-		}
-		s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
-	case watcher.AuthUpdateActionDelete:
-		id := update.ID
-		if id == "" && update.Auth != nil {
-			id = update.Auth.ID
-		}
-		if id == "" {
-			return
-		}
-		s.applyCoreAuthRemoval(ctx, id)
-	default:
-		log.Debugf("received unknown auth update action: %v", update.Action)
-	}
-}
-
-func (s *Service) ensureWebsocketGateway() {
-	if s == nil {
-		return
-	}
-	if s.wsGateway != nil {
-		return
-	}
-	opts := wsrelay.Options{
-		Path:           "/v1/ws",
-		OnConnected:    s.wsOnConnected,
-		OnDisconnected: s.wsOnDisconnected,
-		LogDebugf:      log.Debugf,
-		LogInfof:       log.Infof,
-		LogWarnf:       log.Warnf,
-	}
-	s.wsGateway = wsrelay.NewManager(opts)
-}
-
-func (s *Service) wsOnConnected(channelID string) {
-	if s == nil || channelID == "" {
-		return
-	}
-	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
-		return
-	}
-	if s.coreManager != nil {
-		if existing, ok := s.coreManager.GetByID(channelID); ok && existing != nil {
-			if !existing.Disabled && existing.Status == coreauth.StatusActive {
-				return
-			}
-		}
-	}
-	now := time.Now().UTC()
-	auth := &coreauth.Auth{
-		ID:         channelID,  // keep channel identifier as ID
-		Provider:   "aistudio", // logical provider for switch routing
-		Label:      channelID,  // display original channel id
-		Status:     coreauth.StatusActive,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Attributes: map[string]string{"runtime_only": "true"},
-		Metadata:   map[string]any{"email": channelID}, // metadata drives logging and usage tracking
-	}
-	log.Infof("websocket provider connected: %s", channelID)
-	// Websocket provider presence is a service-owned runtime signal, not a
-	// request-scoped action. Detach it from any transient caller cancellation.
-	s.emitAuthUpdate(context.WithoutCancel(context.Background()), watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionAdd,
-		ID:     auth.ID,
-		Auth:   auth,
-	})
-}
-
-func (s *Service) wsOnDisconnected(channelID string, reason error) {
-	if s == nil || channelID == "" {
-		return
-	}
-	if reason != nil {
-		if strings.Contains(reason.Error(), "replaced by new connection") {
-			log.Infof("websocket provider replaced: %s", channelID)
-			return
-		}
-		log.Warnf("websocket provider disconnected: %s (%v)", channelID, reason)
-	} else {
-		log.Infof("websocket provider disconnected: %s", channelID)
-	}
-	// Disconnect notifications are also service-owned runtime events and must
-	// still be processed during shutdown and reconnect churn.
-	s.emitAuthUpdate(context.WithoutCancel(context.Background()), watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionDelete,
-		ID:     channelID,
-	})
-}
-
-func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
-		return
-	}
-	auth = auth.Clone()
-	s.ensureExecutorsForAuth(auth)
-
-	// IMPORTANT: Update coreManager FIRST, before model registration.
-	// This ensures that configuration changes (proxy_url, prefix, etc.) take effect
-	// immediately for API calls, rather than waiting for model registration to complete.
-	// Model registration may involve network calls (e.g., FetchAntigravityModels) that
-	// could timeout if the new proxy_url is unreachable.
-	op := "register"
-	var err error
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
-		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
-	} else {
-		_, err = s.coreManager.Register(ctx, auth)
-	}
-	if err != nil {
-		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
-		current, ok := s.coreManager.GetByID(auth.ID)
-		if !ok || current.Disabled {
-			GlobalModelRegistry().UnregisterClient(auth.ID)
-			return
-		}
-		auth = current
-	}
-
-	// Register models after auth is updated in coreManager.
-	// This operation may block on network calls, but the auth configuration
-	// is already effective at this point.
-	s.registerModelsForAuth(ctx, auth)
-}
-
-func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
-	if s == nil || id == "" {
-		return
-	}
-	if s.coreManager == nil {
-		return
-	}
-	if _, err := s.coreManager.Delete(coreauth.WithSkipPersist(ctx), id); err != nil {
-		log.Errorf("failed to remove auth %s: %v", id, err)
-		return
-	}
-	GlobalModelRegistry().UnregisterClient(id)
-}
-
-func (s *Service) applyRetryConfig(cfg *config.Config) {
-	if s == nil || s.coreManager == nil || cfg == nil {
-		return
-	}
-	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
-	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval)
-}
-
-func (s *Service) applyConfigReload(newCfg *config.Config, refreshRegisteredModels bool) {
-	if s == nil {
-		return
-	}
-	previousStrategy := ""
-	s.cfgMu.RLock()
-	if s.cfg != nil {
-		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-	}
-	s.cfgMu.RUnlock()
-
-	if newCfg == nil {
-		s.cfgMu.RLock()
-		newCfg = s.cfg
-		s.cfgMu.RUnlock()
-	}
-	if newCfg == nil {
-		return
-	}
-	internalusage.MigrateRoutingConfigFromConfig(newCfg, s.configPath)
-	internalusage.ApplyStoredRoutingConfig(newCfg)
-	internalusage.MigrateProxyPoolFromConfig(newCfg, s.configPath)
-	internalusage.ApplyStoredProxyPool(newCfg)
-	settingsstore.MigrateRuntimeSettingsFromConfig(newCfg, s.configPath)
-	settingsstore.ApplyStoredRuntimeSettings(newCfg)
-	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-	previousStrategy = config.NormalizeRoutingStrategy(previousStrategy)
-	nextStrategy = config.NormalizeRoutingStrategy(nextStrategy)
-	if s.coreManager != nil && previousStrategy != nextStrategy {
 		var selector coreauth.Selector
-		switch nextStrategy {
-		case "fill-first":
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
-		s.coreManager.SetSelector(selector)
-	}
 
-	s.applyRetryConfig(newCfg)
-	s.applyPprofConfig(newCfg)
-	if s.server != nil {
-		s.server.UpdateClients(newCfg)
-	} else {
-		s.syncConfigDerivedAuths(newCfg)
+		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 	}
-	s.cfgMu.Lock()
-	s.cfg = newCfg
-	s.cfgMu.Unlock()
-	if s.watcher != nil {
-		s.watcher.SetConfig(newCfg)
+	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
+	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	coreManager.SetConfig(b.cfg)
+	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+
+	service := &Service{
+		cfg:            b.cfg,
+		configPath:     b.configPath,
+		tokenProvider:  tokenProvider,
+		apiKeyProvider: apiKeyProvider,
+		watcherFactory: watcherFactory,
+		hooks:          b.hooks,
+		authManager:    authManager,
+		accessManager:  accessManager,
+		coreManager:    coreManager,
+		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
-	if s.coreManager != nil {
-		s.coreManager.SetConfig(newCfg)
-		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
-	}
-	s.rebindExecutors()
-	if refreshRegisteredModels && s.coreManager != nil {
-		for _, auth := range s.coreManager.List() {
-			s.registerModelsForAuth(context.Background(), auth)
-		}
-	}
+	return service, nil
 }
 
-func (s *Service) syncConfigDerivedAuths(cfg *config.Config) {
-	if s == nil || s.coreManager == nil || cfg == nil {
-		return
-	}
-
-	ctx := coreauth.WithSkipPersist(context.Background())
-	synth := synthesizer.NewConfigSynthesizer()
-	auths, err := synth.Synthesize(&synthesizer.SynthesisContext{
-		Config:      cfg,
-		AuthDir:     cfg.AuthDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
-	})
-	if err != nil {
-		log.WithError(err).Warn("failed to synthesize config auths during service config reload")
-		return
-	}
-
-	desiredIDs := make(map[string]struct{}, len(auths))
-	for _, next := range auths {
-		if next == nil || strings.TrimSpace(next.ID) == "" {
-			continue
-		}
-		desiredIDs[next.ID] = struct{}{}
-		if existing, ok := s.coreManager.GetByID(next.ID); ok && existing != nil {
-			next.CreatedAt = existing.CreatedAt
-			next.LastRefreshedAt = existing.LastRefreshedAt
-			next.NextRefreshAfter = existing.NextRefreshAfter
-			_, err = s.coreManager.Update(ctx, next)
-		} else {
-			_, err = s.coreManager.Register(ctx, next)
-		}
-		if err != nil {
-			log.WithError(err).Warnf("failed to apply config auth %s", next.ID)
-		}
-	}
-
-	for _, existing := range s.coreManager.List() {
-		if existing == nil || strings.TrimSpace(existing.ID) == "" {
-			continue
-		}
-		if !isServiceConfigDerivedAuth(existing) {
-			continue
-		}
-		if _, stillConfigured := desiredIDs[existing.ID]; stillConfigured {
-			continue
-		}
-		if existing.Disabled && existing.Status == coreauth.StatusDisabled {
-			continue
-		}
-		disabled := existing.Clone()
-		disabled.Disabled = true
-		disabled.Status = coreauth.StatusDisabled
-		disabled.StatusMessage = "removed via config update"
-		disabled.UpdatedAt = time.Now()
-		if _, err := s.coreManager.Update(ctx, disabled); err != nil {
-			log.WithError(err).Warnf("failed to disable removed config auth %s", disabled.ID)
-		}
-	}
+// RegisterUsagePlugin registers a usage plugin on the global usage manager.
+func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
+	usage.RegisterPlugin(plugin)
 }
 
-func isServiceConfigDerivedAuth(authState *coreauth.Auth) bool {
-	if authState == nil || authState.Attributes == nil {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(authState.Attributes["source"])), "config:")
+// NewFileTokenClientProvider returns the default token-backed client loader.
+func NewFileTokenClientProvider() TokenClientProvider {
+	return &fileTokenClientProvider{}
 }
 
-func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
-	if a == nil {
-		return "", "", false
-	}
-	if len(a.Attributes) > 0 {
-		providerKey = strings.TrimSpace(a.Attributes["provider_key"])
-		compatName = strings.TrimSpace(a.Attributes["compat_name"])
-		if compatName != "" {
-			if providerKey == "" {
-				providerKey = compatName
-			}
-			return strings.ToLower(providerKey), compatName, true
-		}
-	}
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "openai-compatibility") {
-		return "openai-compatibility", strings.TrimSpace(a.Label), true
-	}
-	return "", "", false
+type fileTokenClientProvider struct{}
+
+func (p *fileTokenClientProvider) Load(ctx context.Context, cfg *config.Config) (*TokenClientResult, error) {
+	// Stateless executors handle tokens.
+	_ = ctx
+	_ = cfg
+	return &TokenClientResult{SuccessfulAuthed: 0}, nil
 }
 
-func openAICompatAuthEntryActive(compat *config.OpenAICompatibility, auth *coreauth.Auth) bool {
-	if compat == nil || compat.Disabled {
-		return false
-	}
-	if len(compat.APIKeyEntries) == 0 {
-		return true
-	}
-	authKey := ""
-	if auth != nil && auth.Attributes != nil {
-		authKey = strings.TrimSpace(auth.Attributes["api_key"])
-	}
-	for i := range compat.APIKeyEntries {
-		entry := &compat.APIKeyEntries[i]
-		if entry.Disabled {
-			continue
-		}
-		if strings.TrimSpace(entry.APIKey) == authKey {
-			return true
-		}
-	}
-	return false
+// NewAPIKeyClientProvider returns the default API key client loader that reuses existing logic.
+func NewAPIKeyClientProvider() APIKeyClientProvider {
+	return &apiKeyClientProvider{}
 }
 
-func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
-	s.ensureExecutorsForAuthWithMode(a, false)
-}
-
-func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
-	if s == nil || s.coreManager == nil || a == nil {
-		return
-	}
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		if !forceReplace {
-			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
-			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
-		return
-	}
-	// Skip disabled auth entries when (re)binding executors.
-	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
-	// and must not override active provider executors (such as iFlow OAuth accounts).
-	if a.Disabled {
-		return
-	}
-	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
-		if compatProviderKey == "" {
-			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))
-		}
-		if compatProviderKey == "" {
-			compatProviderKey = "openai-compatibility"
-		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
-		return
-	}
-	switch strings.ToLower(a.Provider) {
-	case "gemini":
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
-	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
-	case "gemini-cli":
-		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
-	case "aistudio":
-		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
-		}
-		return
-	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
-	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "bedrock":
-		s.coreManager.RegisterExecutor(executor.NewBedrockExecutor(s.cfg))
-	case "opencode-go":
-		s.coreManager.RegisterExecutor(executor.NewOpenCodeGoExecutor(s.cfg))
-	case "qwen":
-		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
-	case "iflow":
-		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
-	case "kimi":
-		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
-	default:
-		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
-		if providerKey == "" {
-			providerKey = "openai-compatibility"
-		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
-	}
-}
-
-// rebindExecutors refreshes provider executors so they observe the latest configuration.
-func (s *Service) rebindExecutors() {
-	if s == nil || s.coreManager == nil {
-		return
-	}
-	auths := s.coreManager.List()
-	reboundCodex := false
-	for _, auth := range auths {
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-			if reboundCodex {
-				continue
-			}
-			reboundCodex = true
-		}
-		s.ensureExecutorsForAuthWithMode(auth, true)
-	}
-}
-
-// Run starts the service and blocks until the context is cancelled or the server stops.
-// It initializes all components including authentication, file watching, HTTP server,
-// and starts processing requests. The method blocks until the context is cancelled.
-//
-// Parameters:
-//   - ctx: The context for controlling the service lifecycle
-//
-// Returns:
-//   - error: An error if the service fails to start or run
-func (s *Service) Run(ctx context.Context) error {
-	if s == nil {
-		return fmt.Errorf("cliproxy: service is nil")
-	}
-	if ctx == nil {
-		// The top-level service may be started without an external owner context.
-		// In that case it owns the root process lifetime itself.
-		ctx = context.Background()
-	}
-
-	usage.StartDefault(ctx)
-
-	// Shutdown needs a bounded context that survives parent cancellation long
-	// enough to stop the HTTP server, watcher, websocket gateway, and pprof cleanly.
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer shutdownCancel()
-	defer func() {
-		if err := s.Shutdown(shutdownCtx); err != nil {
-			log.Errorf("service shutdown returned error: %v", err)
-		}
-	}()
-
-	if err := s.ensureAuthDir(); err != nil {
-		return err
-	}
-
-	s.applyRetryConfig(s.cfg)
-
-	if s.coreManager != nil {
-		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
-			log.Warnf("failed to load auth store: %v", errLoad)
-		}
-		for _, auth := range s.coreManager.List() {
-			if auth == nil || auth.ID == "" {
-				continue
-			}
-			s.ensureExecutorsForAuth(auth)
-			s.registerModelsForAuth(ctx, auth)
-		}
-	}
-
-	var err error
-	if _, err = s.tokenProvider.Load(ctx, s.cfg); err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if _, err = s.apiKeyProvider.Load(ctx, s.cfg); err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-
-	// legacy clients removed; no caches to refresh
-
-	// handlers no longer depend on legacy clients; pass nil slice initially
-	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
-	serverOptions = append(serverOptions, api.WithConfigMutatedCallback(func(updated *config.Config) {
-		s.applyConfigReload(updated, true)
-	}))
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
-
-	if s.authManager == nil {
-		s.authManager = newDefaultAuthManager()
-	}
-
-	s.ensureWebsocketGateway()
-	if s.server != nil && s.wsGateway != nil {
-		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
-		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
-			if oldEnabled == newEnabled {
-				return
-			}
-			if !oldEnabled && newEnabled {
-				// Existing websocket sessions are service-owned and must be terminated
-				// even if the caller that changed config has already been cancelled.
-				ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				defer cancel()
-				if errStop := s.wsGateway.Stop(ctx); errStop != nil {
-					log.Warnf("failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled, newEnabled, errStop)
-					return
-				}
-				log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
-				return
-			}
-			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
-		})
-	}
-
-	if s.hooks.OnBeforeStart != nil {
-		s.hooks.OnBeforeStart(s.cfg)
-	}
-
-	s.serverErr = make(chan error, 1)
-	// Service owns this server goroutine. The buffered channel lets it exit
-	// even when Shutdown stops the HTTP server before Start observes serverErr.
-	go func() {
-		if errStart := s.server.Start(); errStart != nil {
-			s.serverErr <- errStart
-		} else {
-			s.serverErr <- nil
-		}
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
-
-	s.applyPprofConfig(s.cfg)
-
-	if s.hooks.OnAfterStart != nil {
-		s.hooks.OnAfterStart(s)
-	}
-
-	var watcherWrapper *WatcherWrapper
-	reloadCallback := func(newCfg *config.Config) {
-		s.applyConfigReload(newCfg, false)
-	}
-
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
-	if err != nil {
-		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
-	}
-	s.watcher = watcherWrapper
-	s.ensureAuthUpdateQueue(ctx)
-	if s.authUpdates != nil {
-		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-	}
-	watcherWrapper.SetConfig(s.cfg)
-
-	// Service owns the watcher context and cancels it from Shutdown or when the
-	// parent Start context is cancelled.
-	watcherCtx, watcherCancel := context.WithCancel(ctx)
-	s.watcherCancel = watcherCancel
-	if err = watcherWrapper.Start(watcherCtx); err != nil {
-		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
-	}
-	log.Info("file watcher started for config and auth directory changes")
-
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil {
-		interval := 15 * time.Minute
-		// Auto-refresh is a service-owned background loop and intentionally outlives
-		// any one request while remaining bound to the service lifetime.
-		s.coreManager.StartAutoRefresh(context.WithoutCancel(ctx), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
-	internalusage.StartOpenRouterModelSyncScheduler(ctx)
-
-	select {
-	case <-ctx.Done():
-		log.Debug("service context cancelled, shutting down...")
-		return ctx.Err()
-	case err = <-s.serverErr:
-		return err
-	}
-}
-
-// Shutdown gracefully stops background workers and the HTTP server.
-// It ensures all resources are properly cleaned up and connections are closed.
-// The shutdown is idempotent and can be called multiple times safely.
-//
-// Parameters:
-//   - ctx: The context for controlling the shutdown timeout
-//
-// Returns:
-//   - error: An error if shutdown fails
-func (s *Service) Shutdown(ctx context.Context) error {
-	if s == nil {
-		return nil
-	}
-	var shutdownErr error
-	s.shutdownOnce.Do(func() {
-		if ctx == nil {
-			// Shutdown may be invoked from deferred cleanup after the main service
-			// context is already gone. Fall back to a root context so cleanup can finish.
-			ctx = context.Background()
-		}
-
-		// legacy refresh loop removed; only stopping core auth manager below
-
-		if s.watcherCancel != nil {
-			s.watcherCancel()
-		}
-		if s.coreManager != nil {
-			s.coreManager.StopAutoRefresh()
-		}
-		if s.watcher != nil {
-			if err := s.watcher.Stop(); err != nil {
-				log.Errorf("failed to stop file watcher: %v", err)
-				shutdownErr = err
-			}
-		}
-		if s.wsGateway != nil {
-			if err := s.wsGateway.Stop(ctx); err != nil {
-				log.Errorf("failed to stop websocket gateway: %v", err)
-				if shutdownErr == nil {
-					shutdownErr = err
-				}
-			}
-		}
-		if s.authQueueStop != nil {
-			s.authQueueStop()
-			s.authQueueWG.Wait()
-			s.authQueueStop = nil
-		}
-
-		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
-			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
-			if shutdownErr == nil {
-				shutdownErr = errShutdownPprof
-			}
-		}
-
-		// no legacy clients to persist
-
-		if s.server != nil {
-			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
-				log.Errorf("error stopping API server: %v", err)
-				if shutdownErr == nil {
-					shutdownErr = err
-				}
-			}
-		}
-
-		usage.StopDefault()
-	})
-	return shutdownErr
-}
-
-func (s *Service) ensureAuthDir() error {
-	info, err := os.Stat(s.cfg.AuthDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
-				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
-			}
-			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
-			return nil
-		}
-		return fmt.Errorf("cliproxy: error checking auth directory %s: %w", s.cfg.AuthDir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
-	}
-	return nil
-}
-
-// registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
-func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
-	if a == nil || a.ID == "" {
-		return
-	}
-	if a.Disabled {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
-	if authKind == "" {
-		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
-		} else if strings.EqualFold(kind, "oauth") {
-			authKind = "oauth"
-		}
-	}
-	if a.Attributes != nil {
-		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
-			GlobalModelRegistry().UnregisterClient(a.ID)
-			return
-		}
-	}
-	// Unregister legacy client ID (if present) to avoid double counting
-	if a.Runtime != nil {
-		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
-			if rid := idGetter.GetClientID(); rid != "" && rid != a.ID {
-				GlobalModelRegistry().UnregisterClient(rid)
-			}
-		}
-	}
-	provider := strings.ToLower(strings.TrimSpace(a.Provider))
-	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
-	if compatDetected {
-		provider = "openai-compatibility"
-	}
-	excluded := s.oauthExcludedModels(provider, authKind)
-	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
-	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
-	if a.Attributes != nil {
-		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			excluded = strings.Split(val, ",")
-		}
-	}
-	var models []*ModelInfo
-	switch provider {
-	case "gemini":
-		models = registry.GetGeminiModels()
-		if entry := s.resolveConfigGeminiKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildGeminiConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "vertex":
-		// Vertex AI Gemini supports the same model identifiers as Gemini.
-		models = registry.GetGeminiVertexModels()
-		if authKind == "apikey" {
-			if entry := s.resolveConfigVertexCompatKey(a); entry != nil && len(entry.Models) > 0 {
-				models = buildVertexCompatConfigModels(entry)
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "gemini-cli":
-		models = registry.GetGeminiCLIModels()
-		models = applyExcludedModels(models, excluded)
-	case "aistudio":
-		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
-	case "antigravity":
-		fetchCtx := ctx
-		if fetchCtx == nil {
-			// Model fetch can be called from service-owned refresh paths that have no
-			// request scope; fall back to a service-owned root context in that case.
-			fetchCtx = context.Background()
-		}
-		// Model registration should not be aborted by unrelated caller cancellation
-		// once the service has committed to refreshing the registry.
-		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(fetchCtx), 15*time.Second)
-		models = executor.FetchAntigravityModels(fetchCtx, a, s.cfg)
-		cancel()
-		models = applyExcludedModels(models, excluded)
-	case "claude":
-		models = registry.GetClaudeModels()
-		if entry := s.resolveConfigClaudeKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildClaudeConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = appendOAuthProviderModelConfigs(models, provider, authKind)
-		models = applyExcludedModels(models, excluded)
-	case "bedrock":
-		models = registry.GetBedrockModels()
-		if entry := s.resolveConfigBedrockKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildBedrockConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "opencode-go":
-		models = registry.GetOpenCodeGoModels()
-		if entry := s.resolveConfigOpenCodeGoKey(a); entry != nil && authKind == "apikey" {
-			excluded = entry.ExcludedModels
-		}
-		models = applyExcludedModels(models, excluded)
-	case "codex":
-		models = registry.GetOpenAIModels()
-		if entry := s.resolveConfigCodexKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildCodexConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "qwen":
-		models = registry.GetQwenModels()
-		models = applyExcludedModels(models, excluded)
-	case "iflow":
-		models = registry.GetIFlowModels()
-		models = applyExcludedModels(models, excluded)
-	case "kimi":
-		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
-	default:
-		// Handle OpenAI-compatibility providers by name using config
-		if s.cfg != nil {
-			providerKey := provider
-			compatName := strings.TrimSpace(a.Provider)
-			isCompatAuth := false
-			if compatDetected {
-				if compatProviderKey != "" {
-					providerKey = compatProviderKey
-				}
-				if compatDisplayName != "" {
-					compatName = compatDisplayName
-				}
-				isCompatAuth = true
-			}
-			if strings.EqualFold(providerKey, "openai-compatibility") {
-				isCompatAuth = true
-				if a.Attributes != nil {
-					if v := strings.TrimSpace(a.Attributes["compat_name"]); v != "" {
-						compatName = v
-					}
-					if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-						providerKey = strings.ToLower(v)
-					}
-				}
-				if providerKey == "openai-compatibility" && compatName != "" {
-					providerKey = strings.ToLower(compatName)
-				}
-			} else if a.Attributes != nil {
-				if v := strings.TrimSpace(a.Attributes["compat_name"]); v != "" {
-					compatName = v
-					isCompatAuth = true
-				}
-				if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-					providerKey = strings.ToLower(v)
-					isCompatAuth = true
-				}
-			}
-			for i := range s.cfg.OpenAICompatibility {
-				compat := &s.cfg.OpenAICompatibility[i]
-				if strings.EqualFold(compat.Name, compatName) {
-					if !openAICompatAuthEntryActive(compat, a) {
-						GlobalModelRegistry().UnregisterClient(a.ID)
-						return
-					}
-					// Convert compatibility models to registry models
-					ms := make([]*ModelInfo, 0, len(compat.Models))
-					for j := range compat.Models {
-						m := compat.Models[j]
-						// Use alias as model ID, fallback to name if alias is empty
-						modelID := m.Alias
-						if modelID == "" {
-							modelID = m.Name
-						}
-						ms = append(ms, &ModelInfo{
-							ID:          modelID,
-							Object:      "model",
-							Created:     time.Now().Unix(),
-							OwnedBy:     compat.Name,
-							Type:        "openai-compatibility",
-							DisplayName: modelID,
-							UserDefined: true,
-						})
-					}
-					// Register and return
-					if len(ms) > 0 {
-						if providerKey == "" {
-							providerKey = "openai-compatibility"
-						}
-						GlobalModelRegistry().RegisterClient(a.ID, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
-					} else {
-						// Ensure stale registrations are cleared when model list becomes empty.
-						GlobalModelRegistry().UnregisterClient(a.ID)
-					}
-					return
-				}
-			}
-			if isCompatAuth {
-				// No matching provider found or models removed entirely; drop any prior registration.
-				GlobalModelRegistry().UnregisterClient(a.ID)
-				return
-			}
-		}
-	}
-	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
-	if len(models) > 0 {
-		key := provider
-		if key == "" {
-			key = strings.ToLower(strings.TrimSpace(a.Provider))
-		}
-		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
-		if provider == "antigravity" {
-			s.backfillAntigravityModels(a, models)
-		}
-		return
-	}
-
-	GlobalModelRegistry().UnregisterClient(a.ID)
-}
-
-func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.ClaudeKey {
-		entry := &s.cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range s.cfg.ClaudeKey {
-			entry := &s.cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigBedrockKey(auth *coreauth.Auth) *config.BedrockKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrAccessKeyID, attrBase, attrRegion, attrMode string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrAccessKeyID = strings.TrimSpace(auth.Attributes["access_key_id"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-		attrRegion = strings.TrimSpace(auth.Attributes["region"])
-		attrMode = strings.ToLower(strings.TrimSpace(auth.Attributes["auth_mode"]))
-	}
-	if attrMode == "apikey" || attrMode == "api_key" {
-		attrMode = "api-key"
-	}
-	for i := range s.cfg.BedrockKey {
-		entry := &s.cfg.BedrockKey[i]
-		cfgMode := strings.ToLower(strings.TrimSpace(entry.AuthMode))
-		if cfgMode == "" {
-			cfgMode = "sigv4"
-		}
-		if cfgMode == "apikey" || cfgMode == "api_key" {
-			cfgMode = "api-key"
-		}
-		if attrMode != "" && cfgMode != attrMode {
-			continue
-		}
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrBase != "" && !strings.EqualFold(cfgBase, attrBase) {
-			continue
-		}
-		cfgRegion := strings.TrimSpace(entry.Region)
-		if cfgRegion == "" {
-			cfgRegion = config.DefaultBedrockRegion
-		}
-		if attrRegion != "" && !strings.EqualFold(cfgRegion, attrRegion) {
-			continue
-		}
-		if cfgMode == "api-key" {
-			if attrKey != "" && strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-			continue
-		}
-		cfgAccessKeyID := strings.TrimSpace(entry.AccessKeyID)
-		if attrAccessKeyID != "" && strings.EqualFold(cfgAccessKeyID, attrAccessKeyID) {
-			return entry
-		}
-		if attrKey != "" && strings.EqualFold(cfgAccessKeyID, attrKey) {
-			return entry
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigOpenCodeGoKey(auth *coreauth.Auth) *config.OpenCodeGoKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-	}
-	for i := range s.cfg.OpenCodeGoKey {
-		entry := &s.cfg.OpenCodeGoKey[i]
-		if attrKey != "" && strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-			return entry
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.VertexCompatAPIKey {
-		entry := &s.cfg.VertexCompatAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range s.cfg.VertexCompatAPIKey {
-			entry := &s.cfg.VertexCompatAPIKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.CodexKey {
-		entry := &s.cfg.CodexKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
-}
-
-func (s *Service) oauthExcludedModels(provider, authKind string) []string {
-	cfg := s.cfg
-	if cfg == nil {
-		return nil
-	}
-	authKindKey := strings.ToLower(strings.TrimSpace(authKind))
-	providerKey := strings.ToLower(strings.TrimSpace(provider))
-	if authKindKey == "apikey" {
-		return nil
-	}
-	return cfg.OAuthExcludedModels[providerKey]
-}
-
-func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels []*ModelInfo) {
-	if s == nil || s.coreManager == nil || len(primaryModels) == 0 {
-		return
-	}
-
-	sourceID := ""
-	if source != nil {
-		sourceID = strings.TrimSpace(source.ID)
-	}
-
-	reg := registry.GetGlobalRegistry()
-	for _, candidate := range s.coreManager.List() {
-		if candidate == nil || candidate.Disabled {
-			continue
-		}
-		candidateID := strings.TrimSpace(candidate.ID)
-		if candidateID == "" || candidateID == sourceID {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(candidate.Provider), "antigravity") {
-			continue
-		}
-		if len(reg.GetModelsForClient(candidateID)) > 0 {
-			continue
-		}
-
-		authKind := strings.ToLower(strings.TrimSpace(candidate.Attributes["auth_kind"]))
-		if authKind == "" {
-			if kind, _ := candidate.AccountInfo(); strings.EqualFold(kind, "api_key") {
-				authKind = "apikey"
-			}
-		}
-		excluded := s.oauthExcludedModels("antigravity", authKind)
-		if candidate.Attributes != nil {
-			if val, ok := candidate.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-				excluded = strings.Split(val, ",")
-			}
-		}
-
-		models := applyExcludedModels(primaryModels, excluded)
-		models = applyOAuthModelAlias(s.cfg, "antigravity", authKind, models)
-		if len(models) == 0 {
-			continue
-		}
-
-		reg.RegisterClient(candidateID, "antigravity", applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
-		log.Debugf("antigravity models backfilled for auth %s using primary model list", candidateID)
-	}
-}
-
-func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
-	if len(models) == 0 || len(excluded) == 0 {
-		return models
-	}
-
-	patterns := make([]string, 0, len(excluded))
-	for _, item := range excluded {
-		if trimmed := strings.TrimSpace(item); trimmed != "" {
-			patterns = append(patterns, strings.ToLower(trimmed))
-		}
-	}
-	if len(patterns) == 0 {
-		return models
-	}
-
-	filtered := make([]*ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		modelID := strings.ToLower(strings.TrimSpace(model.ID))
-		blocked := false
-		for _, pattern := range patterns {
-			if matchWildcard(pattern, modelID) {
-				blocked = true
-				break
-			}
-		}
-		if !blocked {
-			filtered = append(filtered, model)
-		}
-	}
-	return filtered
-}
-
-func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {
-	trimmedPrefix := strings.TrimSpace(prefix)
-	if trimmedPrefix == "" || len(models) == 0 {
-		return models
-	}
-
-	out := make([]*ModelInfo, 0, len(models)*2)
-	seen := make(map[string]struct{}, len(models)*2)
-
-	addModel := func(model *ModelInfo) {
-		if model == nil {
-			return
-		}
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			return
-		}
-		if _, exists := seen[id]; exists {
-			return
-		}
-		seen[id] = struct{}{}
-		out = append(out, model)
-	}
-
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		baseID := strings.TrimSpace(model.ID)
-		if baseID == "" {
-			continue
-		}
-		if !forceModelPrefix || trimmedPrefix == baseID {
-			addModel(model)
-		}
-		clone := *model
-		clone.ID = trimmedPrefix + "/" + baseID
-		addModel(&clone)
-	}
-	return out
-}
-
-// matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
-func matchWildcard(pattern, value string) bool {
-	if pattern == "" {
-		return false
-	}
-
-	// Fast path for exact match (no wildcard present).
-	if !strings.Contains(pattern, "*") {
-		return pattern == value
-	}
-
-	parts := strings.Split(pattern, "*")
-	// Handle prefix.
-	if prefix := parts[0]; prefix != "" {
-		if !strings.HasPrefix(value, prefix) {
-			return false
-		}
-		value = value[len(prefix):]
-	}
-
-	// Handle suffix.
-	if suffix := parts[len(parts)-1]; suffix != "" {
-		if !strings.HasSuffix(value, suffix) {
-			return false
-		}
-		value = value[:len(value)-len(suffix)]
-	}
-
-	// Handle middle segments in order.
-	for i := 1; i < len(parts)-1; i++ {
-		segment := parts[i]
-		if segment == "" {
-			continue
-		}
-		idx := strings.Index(value, segment)
-		if idx < 0 {
-			return false
-		}
-		value = value[idx+len(segment):]
-	}
-
-	return true
-}
-
-type modelEntry interface {
-	GetName() string
-	GetAlias() string
-}
-
-func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
-	for i := range models {
-		model := models[i]
-		name := strings.TrimSpace(model.GetName())
-		alias := strings.TrimSpace(model.GetAlias())
-		if alias == "" {
-			alias = name
-		}
-		if alias == "" {
-			continue
-		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		display := name
-		if display == "" {
-			display = alias
-		}
-		info := &ModelInfo{
-			ID:          alias,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     ownedBy,
-			Type:        modelType,
-			DisplayName: display,
-			UserDefined: true,
-		}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
-		}
-		out = append(out, info)
-	}
-	return out
-}
-
-func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "google", "vertex")
-}
-
-func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "google", "gemini")
-}
-
-func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "anthropic", "claude")
-}
-
-func appendOAuthProviderModelConfigs(models []*ModelInfo, provider, authKind string) []*ModelInfo {
-	if !strings.EqualFold(strings.TrimSpace(authKind), "oauth") {
-		return models
-	}
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return models
-	}
-	owners := modelConfigOwnerAliases(provider)
-	if len(owners) == 0 {
-		return models
-	}
-
-	out := append([]*ModelInfo(nil), models...)
-	seen := make(map[string]struct{}, len(out))
-	for _, model := range out {
-		if model == nil {
-			continue
-		}
-		id := strings.ToLower(strings.TrimSpace(model.ID))
-		if id != "" {
-			seen[id] = struct{}{}
-		}
-	}
-
-	now := time.Now().Unix()
-	for _, row := range internalusage.ListModelConfigs() {
-		modelID := strings.TrimSpace(row.ModelID)
-		if modelID == "" || !row.Enabled || !oauthProviderModelConfigSourceAllowed(row.Source) {
-			continue
-		}
-		if _, ok := owners[normalizeModelConfigOwner(row.OwnedBy)]; !ok {
-			continue
-		}
-		key := strings.ToLower(modelID)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     strings.TrimSpace(row.OwnedBy),
-			Type:        provider,
-			DisplayName: strings.TrimSpace(row.Description),
-			Description: strings.TrimSpace(row.Description),
-			UserDefined: true,
-		})
-	}
-	return out
-}
-
-func oauthProviderModelConfigSourceAllowed(source string) bool {
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "user", "seed", "openrouter":
-		return true
-	default:
-		return false
-	}
-}
-
-func modelConfigOwnerAliases(provider string) map[string]struct{} {
-	provider = normalizeModelConfigOwner(provider)
-	if provider == "" {
-		return nil
-	}
-	values := []string{provider}
-	switch provider {
-	case "claude":
-		values = append(values, "anthropic", "claude-code")
-	case "gemini", "gemini-cli", "vertex":
-		values = append(values, "google")
-	case "codex":
-		values = append(values, "openai")
-	}
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value = normalizeModelConfigOwner(value); value != "" {
-			out[value] = struct{}{}
-		}
-	}
-	return out
-}
-
-func normalizeModelConfigOwner(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), "-"))
-}
-
-func buildBedrockConfigModels(entry *config.BedrockKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "aws", "bedrock")
-}
-
-func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "openai", "openai")
-}
-
-func rewriteModelInfoName(name, oldID, newID string) string {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return name
-	}
-	oldID = strings.TrimSpace(oldID)
-	newID = strings.TrimSpace(newID)
-	if oldID == "" || newID == "" {
-		return name
-	}
-	if strings.EqualFold(oldID, newID) {
-		return name
-	}
-	if strings.EqualFold(trimmed, oldID) {
-		return newID
-	}
-	if strings.HasSuffix(trimmed, "/"+oldID) {
-		prefix := strings.TrimSuffix(trimmed, oldID)
-		return prefix + newID
-	}
-	if trimmed == "models/"+oldID {
-		return "models/" + newID
-	}
-	return name
-}
-
-func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
-	if cfg == nil || len(models) == 0 {
-		return models
-	}
-	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
-	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
-		return models
-	}
-	aliases := cfg.OAuthModelAlias[channel]
-	if len(aliases) == 0 {
-		return models
-	}
-
-	type aliasEntry struct {
-		alias string
-		fork  bool
-	}
-
-	forward := make(map[string][]aliasEntry, len(aliases))
-	for i := range aliases {
-		name := strings.TrimSpace(aliases[i].Name)
-		alias := strings.TrimSpace(aliases[i].Alias)
-		if name == "" || alias == "" {
-			continue
-		}
-		if strings.EqualFold(name, alias) {
-			continue
-		}
-		key := strings.ToLower(name)
-		forward[key] = append(forward[key], aliasEntry{alias: alias, fork: aliases[i].Fork})
-	}
-	if len(forward) == 0 {
-		return models
-	}
-
-	out := make([]*ModelInfo, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			continue
-		}
-		key := strings.ToLower(id)
-		entries := forward[key]
-		if len(entries) == 0 {
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, model)
-			continue
-		}
-
-		keepOriginal := false
-		for _, entry := range entries {
-			if entry.fork {
-				keepOriginal = true
-				break
-			}
-		}
-		if keepOriginal {
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
-				out = append(out, model)
-			}
-		}
-
-		addedAlias := false
-		for _, entry := range entries {
-			mappedID := strings.TrimSpace(entry.alias)
-			if mappedID == "" {
-				continue
-			}
-			if strings.EqualFold(mappedID, id) {
-				continue
-			}
-			aliasKey := strings.ToLower(mappedID)
-			if _, exists := seen[aliasKey]; exists {
-				continue
-			}
-			seen[aliasKey] = struct{}{}
-			clone := *model
-			clone.ID = mappedID
-			if clone.Name != "" {
-				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
-			}
-			out = append(out, &clone)
-			addedAlias = true
-		}
-
-		if !keepOriginal && !addedAlias {
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, model)
-		}
-	}
-	return out
+type apiKeyClientProvider struct{}
+
+func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error) {
+	geminiCount, vertexCompatCount, claudeCount, codexCount, bedrockCount, openCodeGoCount, openAICompat := buildAPIKeyClients(cfg)
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
+	return &APIKeyClientResult{
+		GeminiKeyCount:       geminiCount,
+		VertexCompatKeyCount: vertexCompatCount,
+		ClaudeKeyCount:       claudeCount,
+		CodexKeyCount:        codexCount,
+		BedrockKeyCount:      bedrockCount,
+		OpenCodeGoKeyCount:   openCodeGoCount,
+		OpenAICompatCount:    openAICompat,
+	}, nil
 }

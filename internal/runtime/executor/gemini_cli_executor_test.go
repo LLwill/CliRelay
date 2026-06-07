@@ -91,6 +91,73 @@ func TestResolveGeminiCLITokenOAuthClientUsesConfiguredSecretForMatchingStoredCl
 	}
 }
 
+func TestParseRetryDelayFromRetryInfo(t *testing.T) {
+	body := []byte(`{
+		"error": {
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.RetryInfo",
+					"retryDelay": "2.5s"
+				}
+			]
+		}
+	}`)
+
+	delay, err := parseRetryDelay(body)
+	if err != nil {
+		t.Fatalf("parseRetryDelay returned error: %v", err)
+	}
+	if delay == nil || *delay != 2500*time.Millisecond {
+		t.Fatalf("delay = %v, want 2.5s", delay)
+	}
+}
+
+func TestParseGeminiCLIQuotaProbeGroupsBlockedModels(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ModelStates: map[string]*cliproxyauth.ModelState{
+			"gemini-2.5-pro-preview-06-05": {
+				Quota: cliproxyauth.QuotaState{Exceeded: true},
+			},
+			"gemini-2.5-flash": {
+				Quota: cliproxyauth.QuotaState{Exceeded: true},
+			},
+		},
+	}
+	body := []byte(`{
+		"buckets": [
+			{
+				"modelId": "projects/test/locations/us/models/gemini-2.5-pro",
+				"remainingFraction": 0.3
+			},
+			{
+				"modelId": "gemini-2.5-flash",
+				"resetTime": "2026-06-07T12:00:00Z"
+			}
+		]
+	}`)
+
+	result := parseGeminiCLIQuotaProbe(auth, body)
+	if result == nil {
+		t.Fatal("parseGeminiCLIQuotaProbe returned nil")
+	}
+
+	proResult, ok := result.Models["gemini-2.5-pro-preview-06-05"]
+	if !ok || !proResult.Recovered {
+		t.Fatalf("pro model result = %+v, want recovered", proResult)
+	}
+	flashResult, ok := result.Models["gemini-2.5-flash"]
+	if !ok {
+		t.Fatal("missing gemini-2.5-flash result")
+	}
+	if flashResult.Recovered {
+		t.Fatalf("flash result = %+v, want unrecovered", flashResult)
+	}
+	wantReset := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	if !flashResult.NextRecoverAt.Equal(wantReset) {
+		t.Fatalf("flash NextRecoverAt = %v, want %v", flashResult.NextRecoverAt, wantReset)
+	}
+}
+
 type ioNopCloser struct {
 	*strings.Reader
 }

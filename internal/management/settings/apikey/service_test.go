@@ -32,7 +32,7 @@ func setupTestDB(t *testing.T) {
 
 func TestReplaceKeysNormalizesAndListsEnabledKeys(t *testing.T) {
 	setupTestDB(t)
-	svc := NewService(nil, nil, nil)
+	svc := NewService(nil)
 
 	if err := svc.ReplaceKeys([]string{" sk-one ", "", "sk-two"}); err != nil {
 		t.Fatalf("ReplaceKeys() error = %v, want nil", err)
@@ -48,7 +48,7 @@ func TestReplaceKeysNormalizesAndListsEnabledKeys(t *testing.T) {
 
 func TestPatchAndDeleteKey(t *testing.T) {
 	setupTestDB(t)
-	svc := NewService(nil, nil, nil)
+	svc := NewService(nil)
 
 	if err := svc.PatchKey("", " sk-created "); err != nil {
 		t.Fatalf("PatchKey(create) error = %v, want nil", err)
@@ -87,7 +87,7 @@ func TestReplacePermissionProfilesValidatesAndSanitizes(t *testing.T) {
 			out = append(out, channel)
 		}
 		return out, nil
-	}, nil, nil)
+	})
 
 	err := svc.ReplacePermissionProfiles([]usage.APIKeyPermissionProfileRow{{
 		ID:              " standard ",
@@ -112,12 +112,167 @@ func TestReplacePermissionProfilesValidatesAndSanitizes(t *testing.T) {
 
 func TestReplacePermissionProfilesRejectsMissingIdentity(t *testing.T) {
 	setupTestDB(t)
-	svc := NewService(nil, nil, nil)
+	svc := NewService(nil)
 
 	if err := svc.ReplacePermissionProfiles([]usage.APIKeyPermissionProfileRow{{Name: "Name"}}); !errors.Is(err, ErrInvalidProfileID) {
 		t.Fatalf("missing id error = %v, want ErrInvalidProfileID", err)
 	}
 	if err := svc.ReplacePermissionProfiles([]usage.APIKeyPermissionProfileRow{{ID: "standard"}}); !errors.Is(err, ErrInvalidProfileName) {
 		t.Fatalf("missing name error = %v, want ErrInvalidProfileName", err)
+	}
+}
+
+func TestRenameAndRemoveChannelRestrictions(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(nil)
+
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{
+		Key:             "sk-channel",
+		AllowedChannels: []string{"Team Old", "Other"},
+	}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-channel): %v", err)
+	}
+	if err := svc.ReplacePermissionProfiles([]usage.APIKeyPermissionProfileRow{{
+		ID:              "standard",
+		Name:            "Standard",
+		AllowedChannels: []string{"Team Old", "Other"},
+	}}); err != nil {
+		t.Fatalf("ReplacePermissionProfiles() error = %v", err)
+	}
+
+	oldNameSet := map[string]struct{}{"team old": {}}
+	if err := svc.RenameAllowedChannelRestrictions(oldNameSet, "Team New"); err != nil {
+		t.Fatalf("RenameAllowedChannelRestrictions() error = %v", err)
+	}
+	if err := svc.RenamePermissionProfileChannelRestrictions(oldNameSet, "Team New"); err != nil {
+		t.Fatalf("RenamePermissionProfileChannelRestrictions() error = %v", err)
+	}
+
+	key := usage.GetAPIKey("sk-channel")
+	if key == nil || !reflect.DeepEqual(key.AllowedChannels, []string{"Team New", "Other"}) {
+		t.Fatalf("renamed key channels = %#v, want Team New/Other", key)
+	}
+	profiles := svc.PermissionProfiles()
+	if len(profiles) != 1 || !reflect.DeepEqual(profiles[0].AllowedChannels, []string{"Team New", "Other"}) {
+		t.Fatalf("renamed profile channels = %#v, want Team New/Other", profiles)
+	}
+
+	removeSet := map[string]struct{}{"team new": {}}
+	if err := svc.RemoveAllowedChannelRestrictions(removeSet); err != nil {
+		t.Fatalf("RemoveAllowedChannelRestrictions() error = %v", err)
+	}
+	if err := svc.RemovePermissionProfileChannelRestrictions(removeSet); err != nil {
+		t.Fatalf("RemovePermissionProfileChannelRestrictions() error = %v", err)
+	}
+
+	key = usage.GetAPIKey("sk-channel")
+	if key == nil || !reflect.DeepEqual(key.AllowedChannels, []string{"Other"}) {
+		t.Fatalf("removed key channels = %#v, want Other", key)
+	}
+	profiles = svc.PermissionProfiles()
+	if len(profiles) != 1 || !reflect.DeepEqual(profiles[0].AllowedChannels, []string{"Other"}) {
+		t.Fatalf("removed profile channels = %#v, want Other", profiles)
+	}
+}
+
+func TestReplaceEntriesSanitizesAndValidates(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(
+		func(channels []string) ([]string, error) {
+			return []string{"known-channel"}, nil
+		},
+		WithChannelGroupValidator(func(groups []string) ([]string, error) {
+			return groups, nil
+		}),
+		WithEntryValidator(func(entry config.APIKeyEntry) error {
+			if !reflect.DeepEqual(entry.AllowedChannelGroups, []string{"pro"}) {
+				t.Fatalf("AllowedChannelGroups = %#v, want normalized pro", entry.AllowedChannelGroups)
+			}
+			if !reflect.DeepEqual(entry.AllowedChannels, []string{"known-channel"}) {
+				t.Fatalf("AllowedChannels = %#v, want sanitized channel", entry.AllowedChannels)
+			}
+			return nil
+		}),
+	)
+
+	err := svc.ReplaceEntries([]config.APIKeyEntry{{
+		Key:                  " sk-entry ",
+		Name:                 " Entry ",
+		AllowedChannels:      []string{"drop-me"},
+		AllowedChannelGroups: []string{" PRO ", "pro"},
+	}})
+	if err != nil {
+		t.Fatalf("ReplaceEntries() error = %v, want nil", err)
+	}
+
+	got := usage.GetAPIKey("sk-entry")
+	if got == nil {
+		t.Fatal("expected API key entry after replace")
+	}
+	if !reflect.DeepEqual(got.AllowedChannels, []string{"known-channel"}) {
+		t.Fatalf("stored AllowedChannels = %#v, want sanitized channel", got.AllowedChannels)
+	}
+	if !reflect.DeepEqual(got.AllowedChannelGroups, []string{"pro"}) {
+		t.Fatalf("stored AllowedChannelGroups = %#v, want normalized pro", got.AllowedChannelGroups)
+	}
+}
+
+func TestPatchEntryValidationFailureKeepsOriginalKey(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(
+		nil,
+		WithEntryValidator(func(entry config.APIKeyEntry) error {
+			return errors.New("invalid restriction")
+		}),
+	)
+
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: "sk-old", Name: "Old"}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-old): %v", err)
+	}
+
+	newKey := "sk-new"
+	name := "Renamed"
+	err := svc.PatchEntry(nil, &[]string{"sk-old"}[0], EntryPatch{
+		Key:  &newKey,
+		Name: &name,
+	})
+	if !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("PatchEntry() error = %v, want ErrInvalidEntry", err)
+	}
+	if got := usage.GetAPIKey("sk-old"); got == nil || got.Name != "Old" {
+		t.Fatalf("original key changed unexpectedly: %#v", got)
+	}
+	if got := usage.GetAPIKey("sk-new"); got != nil {
+		t.Fatalf("new key should not exist after failed patch: %#v", got)
+	}
+}
+
+func TestDeleteEntryByIndexDeletesLogsWhenRequested(t *testing.T) {
+	setupTestDB(t)
+	deletedKeys := make([]string, 0, 1)
+	svc := NewService(
+		nil,
+		WithLogsDeleter(func(key string) (int64, error) {
+			deletedKeys = append(deletedKeys, key)
+			return 3, nil
+		}),
+	)
+
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: "sk-delete"}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-delete): %v", err)
+	}
+
+	result, err := svc.DeleteEntry("", &[]int{0}[0], true)
+	if err != nil {
+		t.Fatalf("DeleteEntry() error = %v, want nil", err)
+	}
+	if result.LogsDeleted != 3 {
+		t.Fatalf("LogsDeleted = %d, want 3", result.LogsDeleted)
+	}
+	if !reflect.DeepEqual(deletedKeys, []string{"sk-delete"}) {
+		t.Fatalf("deletedKeys = %#v, want sk-delete", deletedKeys)
+	}
+	if got := usage.GetAPIKey("sk-delete"); got != nil {
+		t.Fatalf("DeleteEntry() kept deleted key: %#v", got)
 	}
 }

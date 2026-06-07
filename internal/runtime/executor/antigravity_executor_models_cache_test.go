@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkmodelcatalog "github.com/router-for-me/CLIProxyAPI/v6/sdk/modelcatalog"
 )
 
 func resetAntigravityPrimaryModelsCacheForTest() {
@@ -22,7 +22,7 @@ func TestStoreAntigravityPrimaryModels_EmptyDoesNotOverwrite(t *testing.T) {
 	resetAntigravityPrimaryModelsCacheForTest()
 	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
 
-	seed := []*registry.ModelInfo{
+	seed := []*sdkmodelcatalog.ModelInfo{
 		{ID: "claude-sonnet-4-5"},
 		{ID: "gemini-2.5-pro"},
 	}
@@ -33,7 +33,7 @@ func TestStoreAntigravityPrimaryModels_EmptyDoesNotOverwrite(t *testing.T) {
 	if updated := storeAntigravityPrimaryModels(nil); updated {
 		t.Fatal("expected nil model list not to overwrite primary cache")
 	}
-	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{}); updated {
+	if updated := storeAntigravityPrimaryModels([]*sdkmodelcatalog.ModelInfo{}); updated {
 		t.Fatal("expected empty model list not to overwrite primary cache")
 	}
 
@@ -50,12 +50,12 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 	resetAntigravityPrimaryModelsCacheForTest()
 	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
 
-	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{{
+	if updated := storeAntigravityPrimaryModels([]*sdkmodelcatalog.ModelInfo{{
 		ID:                         "gpt-5",
 		DisplayName:                "GPT-5",
 		SupportedGenerationMethods: []string{"generateContent"},
 		SupportedParameters:        []string{"temperature"},
-		Thinking: &registry.ThinkingSupport{
+		Thinking: &sdkmodelcatalog.ThinkingSupport{
 			Levels: []string{"high"},
 		},
 	}}); !updated {
@@ -159,7 +159,7 @@ func TestFetchAntigravityModels_UsesProjectAndParsesCurrentCatalog(t *testing.T)
 	}
 
 	models := FetchAntigravityModels(context.Background(), auth, nil)
-	ids := make(map[string]*registry.ModelInfo, len(models))
+	ids := make(map[string]*sdkmodelcatalog.ModelInfo, len(models))
 	for _, model := range models {
 		if model != nil {
 			ids[model.ID] = model

@@ -120,11 +120,12 @@ func TestAuthGroupsMatchesLegacyOAuthEmailAfterRename(t *testing.T) {
 		},
 	}
 
-	groups := authGroups(cfg, auth)
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	groups := authGroups(runtimeCfg, auth)
 	if _, ok := groups["team-alpha"]; !ok {
 		t.Fatalf("expected group match through legacy email alias, got %v", groups)
 	}
-	if got, ok := derivedGroupPriority(cfg, auth, map[string]struct{}{"team-alpha": {}}); !ok || got != 100 {
+	if got, ok := derivedGroupPriority(runtimeCfg, auth, map[string]struct{}{"team-alpha": {}}); !ok || got != 100 {
 		t.Fatalf("derivedGroupPriority() = %d, want 100", got)
 	}
 }
@@ -151,17 +152,18 @@ func TestAuthGroupsExcludeFromDefaultKeepsExplicitGroup(t *testing.T) {
 		Provider: "kimi",
 	}
 
-	groups := authGroups(cfg, auth)
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	groups := authGroups(runtimeCfg, auth)
 	if _, ok := groups["kimicode"]; !ok {
 		t.Fatalf("expected explicit kimicode group, got %v", groups)
 	}
 	if _, ok := groups["default"]; ok {
 		t.Fatalf("exclusive group member should not be in default, got %v", groups)
 	}
-	if authAllowedByGroups(cfg, auth, map[string]struct{}{"default": {}}) {
+	if authAllowedByGroups(runtimeCfg, auth, map[string]struct{}{"default": {}}) {
 		t.Fatal("expected default group restriction to reject isolated auth")
 	}
-	if !authAllowedByGroups(cfg, auth, map[string]struct{}{"kimicode": {}}) {
+	if !authAllowedByGroups(runtimeCfg, auth, map[string]struct{}{"kimicode": {}}) {
 		t.Fatal("expected explicit group restriction to allow isolated auth")
 	}
 }
@@ -173,16 +175,17 @@ func TestEffectiveRouteGroupForSelectionDefaultsOnlyForUnprefixedRootModels(t *t
 		Routing: internalconfig.RoutingConfig{IncludeDefaultGroup: true},
 	}
 
-	if got := effectiveRouteGroupForSelection(cfg, "", nil, "gpt-5.5"); got != "default" {
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	if got := effectiveRouteGroupForSelection(runtimeCfg, "", nil, "gpt-5.5"); got != "default" {
 		t.Fatalf("unprefixed root route group = %q, want default", got)
 	}
-	if got := effectiveRouteGroupForSelection(cfg, "", nil, "kimicode/gpt-5.5"); got != "" {
+	if got := effectiveRouteGroupForSelection(runtimeCfg, "", nil, "kimicode/gpt-5.5"); got != "" {
 		t.Fatalf("prefixed root route group = %q, want empty", got)
 	}
-	if got := effectiveRouteGroupForSelection(cfg, "kimicode", nil, "gpt-5.5"); got != "kimicode" {
+	if got := effectiveRouteGroupForSelection(runtimeCfg, "kimicode", nil, "gpt-5.5"); got != "kimicode" {
 		t.Fatalf("explicit route group = %q, want kimicode", got)
 	}
-	if got := effectiveRouteGroupForSelection(cfg, "", map[string]struct{}{"kimicode": {}}, "gpt-5.5"); got != "" {
+	if got := effectiveRouteGroupForSelection(runtimeCfg, "", map[string]struct{}{"kimicode": {}}, "gpt-5.5"); got != "" {
 		t.Fatalf("allowed group route group = %q, want empty", got)
 	}
 }
@@ -210,13 +213,14 @@ func TestAuthGroupsMatchesAnyDisplayTagDynamically(t *testing.T) {
 		},
 	}
 
-	groups := authGroups(cfg, auth)
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	groups := authGroups(runtimeCfg, auth)
 	if _, ok := groups["tag-pool"]; !ok {
 		t.Fatalf("expected tag-pool from matching tag, got %v", groups)
 	}
 
 	auth.Metadata["custom_tags"] = []string{"other"}
-	groups = authGroups(cfg, auth)
+	groups = authGroups(runtimeCfg, auth)
 	if _, ok := groups["tag-pool"]; ok {
 		t.Fatalf("tag-pool should disappear after the matching tag is removed, got %v", groups)
 	}
@@ -246,13 +250,14 @@ func TestAuthGroupsIgnoresHiddenDisplayTags(t *testing.T) {
 		},
 	}
 
-	groups := authGroups(cfg, auth)
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	groups := authGroups(runtimeCfg, auth)
 	if _, ok := groups["pro-pool"]; ok {
 		t.Fatalf("pro-pool should not match a hidden display tag, got %v", groups)
 	}
 
 	auth.Metadata["display_tags"] = []string{}
-	groups = authGroups(cfg, auth)
+	groups = authGroups(runtimeCfg, auth)
 	if _, ok := groups["pro-pool"]; ok {
 		t.Fatalf("pro-pool should not match an explicit empty display tag list, got %v", groups)
 	}
@@ -278,7 +283,8 @@ func TestDerivedGroupPriorityPreservesExplicitZero(t *testing.T) {
 	}
 	auth := &Auth{Label: "chatgpt-pro1"}
 
-	got, ok := derivedGroupPriority(cfg, auth, map[string]struct{}{"team-alpha": {}})
+	runtimeCfg := newRuntimeConfigSnapshot(cfg)
+	got, ok := derivedGroupPriority(runtimeCfg, auth, map[string]struct{}{"team-alpha": {}})
 	if !ok {
 		t.Fatal("derivedGroupPriority() did not report an explicit priority")
 	}
@@ -286,7 +292,7 @@ func TestDerivedGroupPriorityPreservesExplicitZero(t *testing.T) {
 		t.Fatalf("derivedGroupPriority() = %d, want 0", got)
 	}
 
-	prepared := prepareCandidateForSelection(cfg, auth, "", map[string]struct{}{"team-alpha": {}})
+	prepared := prepareCandidateForSelection(runtimeCfg, auth, "", map[string]struct{}{"team-alpha": {}})
 	if prepared == nil {
 		t.Fatal("prepareCandidateForSelection() = nil")
 	}
@@ -315,11 +321,42 @@ func TestPrepareCandidateForSelectionIgnoresPriorityOutsideSelectionScope(t *tes
 	}
 	auth := &Auth{Label: "chatgpt-pro1"}
 
-	prepared := prepareCandidateForSelection(cfg, auth, "", nil)
+	prepared := prepareCandidateForSelection(newRuntimeConfigSnapshot(cfg), auth, "", nil)
 	if prepared == nil {
 		t.Fatal("prepareCandidateForSelection() = nil")
 	}
 	if got := prepared.Attributes["priority"]; got != "" {
 		t.Fatalf("prepared priority = %q, want empty outside scoped selection", got)
+	}
+}
+
+func TestRouteFallbackFromMetadataNormalizesKnownValues(t *testing.T) {
+	t.Parallel()
+
+	if got := routeFallbackFromMetadata(map[string]any{"route_fallback": " default "}); got != "default" {
+		t.Fatalf("routeFallbackFromMetadata(default) = %q, want default", got)
+	}
+	if got := routeFallbackFromMetadata(map[string]any{"route_fallback": "invalid"}); got != "none" {
+		t.Fatalf("routeFallbackFromMetadata(invalid) = %q, want none", got)
+	}
+}
+
+func TestAuthDisplayTagsRemapsStaleCodexPlanTagToCurrentPlan(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"plan_type":    "pro",
+			"display_tags": []string{"plus", "codex"},
+		},
+	}
+
+	got := authDisplayTags(auth)
+	if len(got) != 2 {
+		t.Fatalf("authDisplayTags() len = %d, want 2 (%v)", len(got), got)
+	}
+	if got[0] != "pro" && got[1] != "pro" {
+		t.Fatalf("authDisplayTags() = %v, want remapped current plan tag pro", got)
 	}
 }

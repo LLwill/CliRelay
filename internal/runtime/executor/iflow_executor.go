@@ -74,7 +74,10 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat:      sdktranslator.FromString("openai"),
+		TranslateAsStream: false,
+	})
 
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
@@ -85,59 +88,41 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
+	translated, _ = sjson.SetBytes(translated, "model", execCtx.BaseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
+	translated, err = thinking.ApplyThinking(
+		translated,
+		req.Model,
+		execCtx.SourceFormat.String(),
+		"iflow",
+		e.Identifier(),
+	)
 	if err != nil {
 		return resp, err
 	}
 
-	body = preserveReasoningContentInMessages(body)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	translated = preserveReasoningContentInMessages(translated)
+	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(execCtx.Context, http.MethodPost, endpoint, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
 	}
 	applyIFlowHeaders(httpReq, apiKey, false)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	recorder := execCtx.Recorder()
+	recorder.RecordRequest(endpoint, http.MethodPost, httpReq.Header.Clone(), translated)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := execCtx.HTTPClient(0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), err.Error())
+		recorder.RecordResponseError(err)
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
 		return resp, err
 	}
 	defer func() {
@@ -145,31 +130,40 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recorder.RecordResponseMetadata(httpResp.StatusCode, httpResp.Header.Clone())
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		reporter.publishFailureWithContent(ctx, string(req.Payload), string(b))
+		recorder.AppendResponseChunk(b)
+		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	data, err := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recorder.RecordResponseError(err)
 		return resp, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publishWithContent(ctx, parseOpenAIUsage(data), string(req.Payload), string(data))
+	recorder.AppendResponseChunk(data)
+	reporter.publishWithContent(execCtx.Context, parseOpenAIUsage(data), string(req.Payload), string(data))
 	// Ensure usage is recorded even if upstream omits usage metadata.
-	reporter.ensurePublished(ctx)
+	reporter.ensurePublished(execCtx.Context)
 
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	out := sdktranslator.TranslateNonStream(
+		execCtx.Context,
+		execCtx.Execution.TargetFormat,
+		execCtx.SourceFormat,
+		req.Model,
+		opts.OriginalRequest,
+		translated,
+		data,
+		&param,
+	)
 	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -179,7 +173,10 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat:      sdktranslator.FromString("openai"),
+		TranslateAsStream: true,
+	})
 
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
@@ -190,76 +187,58 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
+	translated, _ = sjson.SetBytes(translated, "model", execCtx.BaseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
+	translated, err = thinking.ApplyThinking(
+		translated,
+		req.Model,
+		execCtx.SourceFormat.String(),
+		"iflow",
+		e.Identifier(),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	body = preserveReasoningContentInMessages(body)
+	translated = preserveReasoningContentInMessages(translated)
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
-	toolsResult := gjson.GetBytes(body, "tools")
+	toolsResult := gjson.GetBytes(translated, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
-		body = ensureToolsArray(body)
+		translated = ensureToolsArray(translated)
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(execCtx.Context, http.MethodPost, endpoint, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
 	}
 	applyIFlowHeaders(httpReq, apiKey, true)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	recorder := execCtx.Recorder()
+	recorder.RecordRequest(endpoint, http.MethodPost, httpReq.Header.Clone(), translated)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := execCtx.HTTPClient(0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), err.Error())
+		recorder.RecordResponseError(err)
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recorder.RecordResponseMetadata(httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
-		appendAPIResponseChunk(ctx, e.cfg, data)
-		logWithRequestID(ctx).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		reporter.publishFailureWithContent(ctx, string(req.Payload), string(data))
+		recorder.AppendResponseChunk(data)
+		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(data))
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return nil, err
 	}
@@ -279,36 +258,45 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
+			recorder.AppendResponseChunk(line)
 			reporter.appendOutputChunk(line)
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				reporter.publish(execCtx.Context, detail)
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			chunks := sdktranslator.TranslateStream(
+				execCtx.Context,
+				execCtx.Execution.TargetFormat,
+				execCtx.SourceFormat,
+				req.Model,
+				opts.OriginalRequest,
+				translated,
+				bytes.Clone(line),
+				&param,
+			)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			recorder.RecordResponseError(errScan)
+			reporter.publishFailure(execCtx.Context)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
-		reporter.ensurePublished(ctx)
+		reporter.ensurePublished(execCtx.Context)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
 func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat:      sdktranslator.FromString("openai"),
+		TranslateAsStream: false,
+	})
+	body, _ := execCtx.TranslateRequestPair(req.Payload)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-
-	enc, err := tokenizerForModel(baseModel)
+	enc, err := tokenizerForModel(execCtx.BaseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: tokenizer init failed: %w", err)
 	}
@@ -319,7 +307,13 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	translated := sdktranslator.TranslateTokenCount(
+		execCtx.Context,
+		execCtx.Execution.TargetFormat,
+		execCtx.SourceFormat,
+		count,
+		usageJSON,
+	)
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 }
 

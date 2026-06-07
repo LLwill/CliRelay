@@ -1,32 +1,17 @@
 package util
 
-// ContextKey is a strongly-typed context key to avoid collisions with other
-// packages and satisfy static analysis checks (SA1029).
-type ContextKey string
+import sdkrequestctx "github.com/router-for-me/CLIProxyAPI/v6/sdk/requestctx"
+
+// ContextKey preserves the historical internal alias while delegating the
+// public request-context contract to the SDK layer.
+type ContextKey = sdkrequestctx.ContextKey
 
 const (
-	// ContextKeyAlt carries an executor "alt" mode hint (e.g. "responses/compact").
-	ContextKeyAlt ContextKey = "alt"
-
-	// ContextKeyGin carries a *gin.Context for request-scoped logging and helpers.
-	// It is intentionally stored as an opaque value here to avoid import cycles.
-	ContextKeyGin ContextKey = "gin"
-
-	// ContextKeyRoundTripper carries an optional http.RoundTripper override used
-	// by proxy-aware HTTP clients.
-	ContextKeyRoundTripper ContextKey = "cliproxy.roundtripper"
-
-	// ContextKeyAPIKey carries a synthetic API key label for non-HTTP execution
-	// paths that still need request-log attribution.
-	ContextKeyAPIKey ContextKey = "cliproxy.api_key"
-
-	// ContextKeyImageGenerationPhaseHook carries an optional callback that
-	// receives backend image-generation phase updates.
-	ContextKeyImageGenerationPhaseHook ContextKey = "cliproxy.image_generation.phase_hook"
+	ContextKeyAlt                      = sdkrequestctx.ContextKeyAlt
+	ContextKeyGin                      = sdkrequestctx.ContextKeyGin
+	ContextKeyRoundTripper             = sdkrequestctx.ContextKeyRoundTripper
+	ContextKeyAPIKey                   = sdkrequestctx.ContextKeyAPIKey
+	ContextKeyImageGenerationPhaseHook = sdkrequestctx.ContextKeyImageGenerationPhaseHook
 )
 
-const (
-	// GinKeyFirstResponseAt stores the timestamp of the first downstream response
-	// chunk written to the client, used to derive first-token latency.
-	GinKeyFirstResponseAt = "cliproxy.first_response_at"
-)
+const GinKeyFirstResponseAt = sdkrequestctx.GinKeyFirstResponseAt

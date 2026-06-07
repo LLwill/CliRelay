@@ -11,7 +11,7 @@ import (
 func TestPickNextSkipsStatusDisabledAuth(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&stubExecutor{id: "gemini"})
-	manager.runtimeConfig.Store(&internalconfig.Config{Routing: internalconfig.RoutingConfig{IncludeDefaultGroup: true}})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{IncludeDefaultGroup: true}})
 
 	active := &Auth{ID: "a1", Provider: "gemini", Label: "Active", Disabled: false, Status: StatusActive}
 	disabled := &Auth{ID: "a2", Provider: "gemini", Label: "Disabled", Disabled: false, Status: StatusDisabled}
@@ -37,7 +37,7 @@ func TestPickNextSkipsStatusDisabledAuth(t *testing.T) {
 func TestPickNextMixedSkipsStatusDisabledAuth(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&stubExecutor{id: "gemini"})
-	manager.runtimeConfig.Store(&internalconfig.Config{Routing: internalconfig.RoutingConfig{IncludeDefaultGroup: true}})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{IncludeDefaultGroup: true}})
 
 	active := &Auth{ID: "a1", Provider: "gemini", Label: "Active", Disabled: false, Status: StatusActive}
 	disabled := &Auth{ID: "a2", Provider: "gemini", Label: "Disabled", Disabled: false, Status: StatusDisabled}

@@ -20,8 +20,6 @@ const (
 	runtimeSettingsBackupSuffix    = ".pre-runtime-settings-sqlite-migration"
 )
 
-const RuntimeSettingsMigrationBackupSuffix = runtimeSettingsBackupSuffix
-
 var dbBackedConfigYAMLKeys = map[string]bool{
 	"api-keys":                    true,
 	"api-key-entries":             true,
@@ -75,10 +73,6 @@ func backupConfigForMigration(configFilePath string, suffix string) bool {
 	return true
 }
 
-func BackupConfigForMigration(configFilePath string, suffix string) bool {
-	return backupConfigForMigration(configFilePath, suffix)
-}
-
 func cleanAPIKeysFromYAML(configFilePath string) {
 	cleanConfigKeysFromYAML(configFilePath, map[string]bool{
 		"api-keys":        true,
@@ -114,10 +108,6 @@ func cleanRuntimeSettingsFromYAML(configFilePath string) {
 		"oauth-model-alias":      true,
 		"payload":                true,
 	}, "runtime_settings")
-}
-
-func CleanRuntimeSettingsFromYAML(configFilePath string) {
-	cleanRuntimeSettingsFromYAML(configFilePath)
 }
 
 func cleanConfigKeysFromYAML(configFilePath string, keysToRemove map[string]bool, label string) int {

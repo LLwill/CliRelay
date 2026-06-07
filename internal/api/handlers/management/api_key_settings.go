@@ -33,17 +33,20 @@ func (h *Handler) refreshAPIKeyCache() {
 
 func (h *Handler) apiKeySettings() *apikeysettings.Service {
 	if h == nil {
-		return apikeysettings.NewService(nil, nil, nil)
+		return apikeysettings.NewService(nil)
 	}
+
+	var auths []*coreauth.Auth
+	if h.authManager != nil {
+		auths = h.authManager.List()
+	}
+
+	routingCfg := config.RoutingConfig{}
+	if h.cfg != nil {
+		routingCfg = h.cfg.Routing
+	}
+
 	validateEntry := func(entry config.APIKeyEntry) error {
-		var auths []*coreauth.Auth
-		if h.authManager != nil {
-			auths = h.authManager.List()
-		}
-		routingCfg := config.RoutingConfig{}
-		if h.cfg != nil {
-			routingCfg = h.cfg.Routing
-		}
 		return validateRoutingAndAPIKeyRestrictions(&config.Config{
 			SDKConfig: config.SDKConfig{
 				APIKeyEntries: []config.APIKeyEntry{entry},
@@ -51,7 +54,13 @@ func (h *Handler) apiKeySettings() *apikeysettings.Service {
 			Routing: routingCfg,
 		}, auths)
 	}
-	return apikeysettings.NewService(h.sanitizeAllowedChannelsForSave, h.validateAllowedChannelGroups, validateEntry)
+
+	return apikeysettings.NewService(
+		h.sanitizeAllowedChannelsForSave,
+		apikeysettings.WithChannelGroupValidator(h.validateAllowedChannelGroups),
+		apikeysettings.WithEntryValidator(validateEntry),
+		apikeysettings.WithLogsDeleter(usage.DeleteLogsByAPIKey),
+	)
 }
 
 // api-keys (legacy simple list — now backed by SQLite)
@@ -151,7 +160,7 @@ func (h *Handler) PutAPIKeyPermissionProfiles(c *gin.Context) {
 
 // api-key-entries: backed by SQLite api_keys table
 func (h *Handler) GetAPIKeyEntries(c *gin.Context) {
-	c.JSON(200, gin.H{"api-key-entries": h.apiKeySettings().APIKeyEntries()})
+	c.JSON(200, gin.H{"api-key-entries": h.apiKeySettings().ListEntries()})
 }
 
 func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
@@ -172,8 +181,8 @@ func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 		arr = obj.Items
 	}
 	if err := h.apiKeySettings().ReplaceEntries(arr); err != nil {
-		if errors.Is(err, apikeysettings.ErrInvalidEntry) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, apikeysettings.ErrInvalidEntry) || errors.Is(err, apikeysettings.ErrKeyRequired) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": apiKeyEntryErrorMessage(err)})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -185,9 +194,9 @@ func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 
 func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 	var body struct {
-		Index *int                             `json:"index"`
-		Match *string                          `json:"match"`
-		Value *apikeysettings.APIKeyEntryPatch `json:"value"`
+		Index *int                       `json:"index"`
+		Match *string                    `json:"match"`
+		Value *apikeysettings.EntryPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -198,14 +207,11 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 		case errors.Is(err, apikeysettings.ErrItemNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
 			return
-		case errors.Is(err, apikeysettings.ErrKeyRequired):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
-			return
-		case errors.Is(err, apikeysettings.ErrAPIKeyExists):
+		case errors.Is(err, apikeysettings.ErrDuplicateKey):
 			c.JSON(http.StatusConflict, gin.H{"error": "api key already exists"})
 			return
-		case errors.Is(err, apikeysettings.ErrInvalidEntry):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, apikeysettings.ErrInvalidEntry), errors.Is(err, apikeysettings.ErrKeyRequired):
+			c.JSON(http.StatusBadRequest, gin.H{"error": apiKeyEntryErrorMessage(err)})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -216,29 +222,27 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 }
 
 func (h *Handler) DeleteAPIKeyEntry(c *gin.Context) {
-	deleteLogs := shouldDeleteAPIKeyLogs(c)
 	var index *int
-	if idxStr := c.Query("index"); idxStr != "" {
+	if idxStr := strings.TrimSpace(c.Query("index")); idxStr != "" {
 		parsed, err := strconv.Atoi(idxStr)
-		if err == nil {
-			index = &parsed
+		if err != nil {
+			c.JSON(400, gin.H{"error": "missing key or index"})
+			return
 		}
+		index = &parsed
 	}
-	deletedKey, err := h.apiKeySettings().DeleteEntry(c.Query("key"), index)
+
+	result, err := h.apiKeySettings().DeleteEntry(c.Query("key"), index, shouldDeleteAPIKeyLogs(c))
 	if err != nil {
-		if errors.Is(err, apikeysettings.ErrMissingValue) {
+		if errors.Is(err, apikeysettings.ErrMissingKeyOrIndex) {
 			c.JSON(400, gin.H{"error": "missing key or index"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	var logsDeleted int64
-	if deleteLogs && deletedKey != "" {
-		logsDeleted, _ = usage.DeleteLogsByAPIKey(deletedKey)
-	}
 	h.refreshAPIKeyCache()
-	c.JSON(200, gin.H{"status": "ok", "logs_deleted": logsDeleted})
+	c.JSON(200, gin.H{"status": "ok", "logs_deleted": result.LogsDeleted})
 }
 
 func shouldDeleteAPIKeyLogs(c *gin.Context) bool {
@@ -251,4 +255,15 @@ func shouldDeleteAPIKeyLogs(c *gin.Context) bool {
 		return true
 	}
 	return value
+}
+
+func apiKeyEntryErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, apikeysettings.ErrInvalidEntry) {
+		prefix := apikeysettings.ErrInvalidEntry.Error() + ": "
+		return strings.TrimPrefix(err.Error(), prefix)
+	}
+	return err.Error()
 }

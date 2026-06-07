@@ -34,3 +34,15 @@ func (e *Error) StatusCode() int {
 	}
 	return e.HTTPStatus
 }
+
+func errorsEqual(left, right *Error) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Code == right.Code &&
+		left.Message == right.Message &&
+		left.Retryable == right.Retryable &&
+		left.HTTPStatus == right.HTTPStatus &&
+		left.QuotaWindow == right.QuotaWindow &&
+		left.QuotaWindowMinutes == right.QuotaWindowMinutes
+}

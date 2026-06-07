@@ -2,6 +2,27 @@ package auth
 
 import "context"
 
+// TokenStorage defines the SDK-visible contract for persisting credential payloads.
+type TokenStorage interface {
+	SaveTokenToFile(authFilePath string) error
+}
+
+// MetadataSetter is implemented by token storages that can accept arbitrary
+// metadata before serializing themselves to disk.
+type MetadataSetter interface {
+	SetMetadata(map[string]any)
+}
+
+// ApplyStorageMetadata injects metadata into a token storage when supported.
+func ApplyStorageMetadata(storage TokenStorage, meta map[string]any) {
+	if storage == nil {
+		return
+	}
+	if setter, ok := storage.(MetadataSetter); ok {
+		setter.SetMetadata(meta)
+	}
+}
+
 // Store abstracts persistence of Auth state across restarts.
 type Store interface {
 	// List returns all auth records stored in the backend.

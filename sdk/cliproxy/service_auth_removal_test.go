@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -26,8 +25,8 @@ func TestServiceHandleAuthDeleteRemovesAuthFromManager(t *testing.T) {
 		coreManager: manager,
 	}
 
-	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionDelete,
+	service.handleAuthUpdate(context.Background(), runtimeAuthUpdate{
+		Action: runtimeAuthUpdateActionDelete,
 		ID:     authID,
 	})
 

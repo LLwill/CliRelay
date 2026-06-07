@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -55,8 +54,8 @@ func TestServiceRun_RegistersModelsForLoadedAuths(t *testing.T) {
 				start:                 func(context.Context) error { return nil },
 				stop:                  func() error { return nil },
 				setConfig:             func(*config.Config) {},
-				setUpdateQueue:        func(chan<- watcher.AuthUpdate) {},
-				dispatchRuntimeUpdate: func(watcher.AuthUpdate) bool { return false },
+				setUpdateQueue:        func(chan<- runtimeAuthUpdate) {},
+				dispatchRuntimeUpdate: func(runtimeAuthUpdate) bool { return false },
 			}, nil
 		},
 		coreManager:   manager,

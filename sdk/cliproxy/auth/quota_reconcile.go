@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
 const (
@@ -171,10 +169,7 @@ func (m *Manager) probeQuotaRecovery(ctx context.Context, id string, force bool)
 		}
 		m.hook.OnAuthUpdated(ctx, updated.Clone())
 	}
-	for _, model := range recoveredModels {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(id, model)
-		registry.GetGlobalRegistry().ResumeClientModel(id, model)
-	}
+	m.resumeRecoveredQuotaModels(id, recoveredModels)
 	return updated != nil, nil
 }
 
@@ -381,14 +376,4 @@ func updateQuotaAuthRecoverAt(auth *Auth, next time.Time, now time.Time) bool {
 	auth.Quota.NextRecoverAt = next
 	auth.UpdatedAt = now
 	return changed
-}
-
-func errorsEqual(left, right *Error) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.Code == right.Code &&
-		left.Message == right.Message &&
-		left.Retryable == right.Retryable &&
-		left.HTTPStatus == right.HTTPStatus
 }

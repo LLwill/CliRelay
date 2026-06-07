@@ -143,6 +143,56 @@ func TestDeleteWithSkipPersistRemovesAuthWithoutDeletingStore(t *testing.T) {
 	}
 }
 
+func TestRuntimeOnlyAuthSkipsPersistence(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "antigravity",
+		Metadata: map[string]any{"type": "antigravity"},
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+	}
+
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected runtime_only auth to skip Save, got %d", got)
+	}
+
+	if _, err := mgr.Delete(context.Background(), "auth-1"); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if got := store.deleteCount.Load(); got != 0 {
+		t.Fatalf("expected runtime_only auth to skip Delete, got %d", got)
+	}
+}
+
+func TestAuthWithoutMetadataSkipsPersistence(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "antigravity",
+	}
+
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected auth without metadata to skip Save, got %d", got)
+	}
+
+	if _, err := mgr.Delete(context.Background(), "auth-1"); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if got := store.deleteCount.Load(); got != 0 {
+		t.Fatalf("expected auth without metadata to skip Delete, got %d", got)
+	}
+}
+
 func TestRegister_PersistsSnapshotInsteadOfCallerPointer(t *testing.T) {
 	store := &snapshotStore{
 		entered: make(chan struct{}, 1),

@@ -243,13 +243,10 @@ func calculateTokenCostV2(inputTokens, outputTokens, cacheReadTokens, cacheWrite
 // ModelConfigRow cache or ModelPricingRow cache, along with a boolean indicating
 // whether the model is enabled (or found at all).
 func resolveModelPricing(modelID string) (inputPrice, outputPrice, cachedPrice, cacheReadPrice, cacheWritePrice float64, enabled bool) {
-	modelConfigCacheMu.RLock()
-	if row, ok := modelConfigCache[modelID]; ok {
-		modelConfigCacheMu.RUnlock()
+	if row, ok := GetModelConfig(modelID); ok {
 		enabled = row.Enabled
 		return row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion, row.CacheReadPricePerMillion, row.CacheWritePricePerMillion, enabled
 	}
-	modelConfigCacheMu.RUnlock()
 
 	pricingCacheMu.RLock()
 	row, ok := pricingCache[modelID]
@@ -264,9 +261,7 @@ func resolveModelPricing(modelID string) (inputPrice, outputPrice, cachedPrice, 
 // It uses the legacy cached_tokens field and OpenAI-compatible heuristic.
 // Returns 0 if no pricing is configured for the model.
 func CalculateCost(modelID string, inputTokens, outputTokens, cachedTokens int64) float64 {
-	modelConfigCacheMu.RLock()
-	if row, ok := modelConfigCache[modelID]; ok {
-		modelConfigCacheMu.RUnlock()
+	if row, ok := GetModelConfig(modelID); ok {
 		if !row.Enabled {
 			return 0
 		}
@@ -275,7 +270,6 @@ func CalculateCost(modelID string, inputTokens, outputTokens, cachedTokens int64
 		}
 		return calculateTokenCost(inputTokens, outputTokens, cachedTokens, row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion)
 	}
-	modelConfigCacheMu.RUnlock()
 
 	pricingCacheMu.RLock()
 	row, ok := pricingCache[modelID]
@@ -290,9 +284,7 @@ func CalculateCost(modelID string, inputTokens, outputTokens, cachedTokens int64
 // the per-call price if so, along with a boolean. This avoids re-checking the
 // model config cache directly in CalculateCostV2.
 func resolveCallPricing(modelID string) (pricePerCall float64, isCall bool) {
-	modelConfigCacheMu.RLock()
-	defer modelConfigCacheMu.RUnlock()
-	if row, ok := modelConfigCache[modelID]; ok && row.Enabled && normalizePricingMode(row.PricingMode) == "call" {
+	if row, ok := GetModelConfig(modelID); ok && row.Enabled && normalizePricingMode(row.PricingMode) == "call" {
 		return row.PricePerCall, true
 	}
 	return 0, false

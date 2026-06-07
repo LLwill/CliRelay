@@ -2,21 +2,6 @@
   "large_files": {
     "allow_above_1200": [
       {
-        "path": "internal/api/handlers/management/config_lists.go",
-        "max_lines": 2119,
-        "reason": "Phase 1/2 legacy management config-list debt; move settings/API-key/provider-key use cases behind services and DB-first stores."
-      },
-      {
-        "path": "internal/api/server.go",
-        "max_lines": 1851,
-        "reason": "Phase 6 legacy server wiring debt; split routes, middleware, management panel, keep-alive, and reload logic."
-      },
-      {
-        "path": "internal/config/config.go",
-        "max_lines": 2216,
-        "reason": "Phase 2 legacy config schema/YAML/compat debt; split schema, normalize, yamlio, and compat packages."
-      },
-      {
         "path": "internal/logging/request_logger.go",
         "max_lines": 1268,
         "reason": "Legacy request logging debt; keep stable while request-log storage and retention are separated in Phase 3."
@@ -25,46 +10,6 @@
         "path": "internal/registry/model_definitions_static_data.go",
         "max_lines": 1233,
         "reason": "Static model definition data exception; keep out of business-logic large-file goals unless generation/storage changes."
-      },
-      {
-        "path": "internal/runtime/executor/antigravity_executor.go",
-        "max_lines": 1766,
-        "reason": "Phase 4 legacy provider executor debt; migrate provider-specific protocol logic behind the runtime pipeline."
-      },
-      {
-        "path": "internal/runtime/executor/claude_executor.go",
-        "max_lines": 1456,
-        "reason": "Phase 4 legacy provider executor debt; migrate headers/cache/streaming behavior behind the runtime pipeline."
-      },
-      {
-        "path": "internal/runtime/executor/codex_image_executor.go",
-        "max_lines": 2233,
-        "reason": "Phase 4 legacy Codex image executor debt; split request/upload/conversation/poll/download/error modules."
-      },
-      {
-        "path": "internal/runtime/executor/codex_websockets_executor.go",
-        "max_lines": 1453,
-        "reason": "Phase 4 legacy Codex WebSocket executor debt; migrate transport-specific logic behind provider adapters."
-      },
-      {
-        "path": "internal/runtime/executor/opencode_go_executor.go",
-        "max_lines": 1314,
-        "reason": "Phase 4 legacy provider executor debt; move common request/stream/error handling into the runtime pipeline."
-      },
-      {
-        "path": "internal/usage/usage_db.go",
-        "max_lines": 2530,
-        "reason": "Phase 3 legacy usage database debt; split request logs, quota snapshots, cleanup, and dashboard queries."
-      },
-      {
-        "path": "sdk/cliproxy/auth/conductor.go",
-        "max_lines": 3223,
-        "reason": "Phase 5 legacy auth manager facade debt; split registry, selector, execution, refresh, cooldown, aliases, and persistence."
-      },
-      {
-        "path": "sdk/cliproxy/service.go",
-        "max_lines": 1788,
-        "reason": "Phase 6/7 legacy service host debt; move service implementation into internal app/runtime wiring and keep SDK facade stable."
       }
     ]
   },
@@ -257,16 +202,6 @@
       "internal/api/handlers/management/channel_rename.go": {
         "config.SaveConfigPreserveComments": 2,
         "settingsstore.UpsertRuntimeSetting": 2,
-        "usage.CleanDBBackedConfigFromYAML": 2
-      },
-      "internal/api/handlers/management/config_basic.go": {
-        "settingsstore.MigrateRuntimeSettingsFromConfig": 1,
-        "settingsstore.ApplyStoredRuntimeSettings": 1
-      },
-      "internal/api/handlers/management/handler.go": {
-        "config.SaveConfigPreserveComments": 1,
-        "settingsstore.UpsertRuntimeSetting": 1,
-        "settingsstore.PersistRuntimeSettingsFromConfig": 1,
         "usage.CleanDBBackedConfigFromYAML": 2
       }
     }

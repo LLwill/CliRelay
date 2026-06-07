@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	apikeysettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/apikey"
 	oauthsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/oauth"
-	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -29,7 +29,7 @@ func (h *Handler) renameChannelReferences(oldNames []string, newName string) err
 		}
 		if renameOAuthModelAliasChannels(h.cfg, oldNameSet, newName) {
 			configChanged = true
-			if err := settingsstore.UpsertRuntimeSetting(settingsstore.RuntimeSettingOAuthModelAlias, h.cfg.OAuthModelAlias); err != nil {
+			if err := h.storeRuntimeSetting(usage.RuntimeSettingOAuthModelAlias, h.cfg.OAuthModelAlias); err != nil {
 				return fmt.Errorf("failed to persist oauth model aliases: %w", err)
 			}
 		}
@@ -47,11 +47,8 @@ func (h *Handler) renameChannelReferences(oldNames []string, newName string) err
 		return err
 	}
 	if configChanged && h.cfg != nil && strings.TrimSpace(h.configFilePath) != "" {
-		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		if err := h.saveConfigFile(); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
-		}
-		if usage.ConfigStoreAvailable() {
-			usage.CleanDBBackedConfigFromYAML(h.configFilePath)
 		}
 	}
 	if configChanged && h.authManager != nil {
@@ -78,7 +75,7 @@ func (h *Handler) removeChannelReferences(oldNames []string) error {
 		}
 		if removeOAuthModelAliasChannels(h.cfg, oldNameSet) {
 			configChanged = true
-			if err := settingsstore.UpsertRuntimeSetting(settingsstore.RuntimeSettingOAuthModelAlias, h.cfg.OAuthModelAlias); err != nil {
+			if err := h.storeRuntimeSetting(usage.RuntimeSettingOAuthModelAlias, h.cfg.OAuthModelAlias); err != nil {
 				return fmt.Errorf("failed to persist oauth model aliases: %w", err)
 			}
 		}
@@ -96,11 +93,8 @@ func (h *Handler) removeChannelReferences(oldNames []string) error {
 		return err
 	}
 	if configChanged && h.cfg != nil && strings.TrimSpace(h.configFilePath) != "" {
-		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		if err := h.saveConfigFile(); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
-		}
-		if usage.ConfigStoreAvailable() {
-			usage.CleanDBBackedConfigFromYAML(h.configFilePath)
 		}
 	}
 	if configChanged && h.authManager != nil {
@@ -269,68 +263,32 @@ func removeConfigAPIKeyChannels(entries []config.APIKeyEntry, oldNameSet map[str
 }
 
 func renameSQLiteAPIKeyChannels(oldNameSet map[string]struct{}, newName string) error {
-	for _, row := range usage.ListAPIKeys() {
-		channels, changed := renameChannelList(row.AllowedChannels, oldNameSet, newName)
-		if !changed {
-			continue
-		}
-		row.AllowedChannels = channels
-		if err := usage.UpsertAPIKey(row); err != nil {
-			return fmt.Errorf("failed to persist api key channel restrictions: %w", err)
-		}
+	svc := apikeysettings.NewService(nil)
+	if err := svc.RenameAllowedChannelRestrictions(oldNameSet, newName); err != nil {
+		return fmt.Errorf("failed to persist api key channel restrictions: %w", err)
 	}
 	return nil
 }
 
 func removeSQLiteAPIKeyChannels(oldNameSet map[string]struct{}) error {
-	for _, row := range usage.ListAPIKeys() {
-		channels, changed := removeChannelList(row.AllowedChannels, oldNameSet)
-		if !changed {
-			continue
-		}
-		row.AllowedChannels = channels
-		if err := usage.UpsertAPIKey(row); err != nil {
-			return fmt.Errorf("failed to persist api key channel restrictions: %w", err)
-		}
+	svc := apikeysettings.NewService(nil)
+	if err := svc.RemoveAllowedChannelRestrictions(oldNameSet); err != nil {
+		return fmt.Errorf("failed to persist api key channel restrictions: %w", err)
 	}
 	return nil
 }
 
 func renameSQLiteAPIKeyPermissionProfileChannels(oldNameSet map[string]struct{}, newName string) error {
-	profiles := usage.ListAPIKeyPermissionProfiles()
-	changed := false
-	for i := range profiles {
-		channels, channelsChanged := renameChannelList(profiles[i].AllowedChannels, oldNameSet, newName)
-		if !channelsChanged {
-			continue
-		}
-		profiles[i].AllowedChannels = channels
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if err := usage.ReplaceAllAPIKeyPermissionProfiles(profiles); err != nil {
+	svc := apikeysettings.NewService(nil)
+	if err := svc.RenamePermissionProfileChannelRestrictions(oldNameSet, newName); err != nil {
 		return fmt.Errorf("failed to persist api key permission profile channel restrictions: %w", err)
 	}
 	return nil
 }
 
 func removeSQLiteAPIKeyPermissionProfileChannels(oldNameSet map[string]struct{}) error {
-	profiles := usage.ListAPIKeyPermissionProfiles()
-	changed := false
-	for i := range profiles {
-		channels, channelsChanged := removeChannelList(profiles[i].AllowedChannels, oldNameSet)
-		if !channelsChanged {
-			continue
-		}
-		profiles[i].AllowedChannels = channels
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if err := usage.ReplaceAllAPIKeyPermissionProfiles(profiles); err != nil {
+	svc := apikeysettings.NewService(nil)
+	if err := svc.RemovePermissionProfileChannelRestrictions(oldNameSet); err != nil {
 		return fmt.Errorf("failed to persist api key permission profile channel restrictions: %w", err)
 	}
 	return nil

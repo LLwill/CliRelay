@@ -3,8 +3,7 @@ package auth
 import (
 	"strings"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
 type modelAliasEntry interface {
@@ -22,7 +21,7 @@ const (
 	codexAutoReviewUpstreamModel = "gpt-5.5"
 )
 
-func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
+func compileOAuthModelAliasTable(aliases map[string][]sdkconfig.OAuthModelAlias) *oauthModelAliasTable {
 	if len(aliases) == 0 {
 		return &oauthModelAliasTable{}
 	}
@@ -63,7 +62,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 // SetOAuthModelAlias updates the OAuth model name alias table used during execution.
 // The alias is applied per-auth channel to resolve the upstream model name while keeping the
 // client-visible model name unchanged for translation/response formatting.
-func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthModelAlias) {
+func (m *Manager) SetOAuthModelAlias(aliases map[string][]sdkconfig.OAuthModelAlias) {
 	if m == nil {
 		return
 	}
@@ -98,7 +97,7 @@ func resolveBuiltInCodexModelAlias(auth *Auth, requestedModel string) string {
 	if requestedModel == "" {
 		return ""
 	}
-	parsed := thinking.ParseSuffix(requestedModel)
+	parsed := parseModelSuffix(requestedModel)
 	if !strings.EqualFold(strings.TrimSpace(parsed.ModelName), codexAutoReviewModel) {
 		return ""
 	}
@@ -117,7 +116,7 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 		return ""
 	}
 
-	requestResult := thinking.ParseSuffix(requestedModel)
+	requestResult := parseModelSuffix(requestedModel)
 	base := requestResult.ModelName
 	candidates := []string{base}
 	if base != requestedModel {
@@ -129,7 +128,7 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 		if resolved == "" {
 			return ""
 		}
-		if thinking.ParseSuffix(resolved).HasSuffix {
+		if parseModelSuffix(resolved).HasSuffix {
 			return resolved
 		}
 		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
@@ -178,11 +177,9 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		return ""
 	}
 
-	// Extract thinking suffix from requested model using ParseSuffix
-	requestResult := thinking.ParseSuffix(requestedModel)
+	requestResult := parseModelSuffix(requestedModel)
 	baseModel := requestResult.ModelName
 
-	// Candidate keys to match: base model and raw input (handles suffix-parsing edge cases).
 	candidates := []string{baseModel}
 	if baseModel != requestedModel {
 		candidates = append(candidates, requestedModel)
@@ -211,11 +208,9 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			return ""
 		}
 
-		// If config already has suffix, it takes priority.
-		if thinking.ParseSuffix(original).HasSuffix {
+		if parseModelSuffix(original).HasSuffix {
 			return original
 		}
-		// Preserve user's thinking suffix on the resolved model.
 		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
 			return original + "(" + requestResult.RawSuffix + ")"
 		}
@@ -277,5 +272,73 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 		return provider
 	default:
 		return ""
+	}
+}
+
+type modelSuffixResult struct {
+	ModelName string
+	HasSuffix bool
+	RawSuffix string
+}
+
+func isContextWindowSuffix(content string) bool {
+	if content == "" {
+		return false
+	}
+	i := 0
+	for i < len(content) && content[i] >= '0' && content[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	if i < len(content) {
+		switch content[i] {
+		case 'k', 'K', 'm', 'M':
+			i++
+		default:
+			return false
+		}
+	}
+	return i == len(content)
+}
+
+func stripBracketSuffix(model string) string {
+	lastOpen := strings.LastIndex(model, "[")
+	if lastOpen == -1 {
+		return model
+	}
+	if !strings.HasSuffix(model, "]") {
+		return model
+	}
+	if lastOpen+1 >= len(model)-1 {
+		return model
+	}
+	content := model[lastOpen+1 : len(model)-1]
+	if !isContextWindowSuffix(content) {
+		return model
+	}
+	return model[:lastOpen]
+}
+
+func parseModelSuffix(model string) modelSuffixResult {
+	model = stripBracketSuffix(model)
+
+	lastOpen := strings.LastIndex(model, "(")
+	if lastOpen == -1 {
+		return modelSuffixResult{ModelName: model, HasSuffix: false}
+	}
+	if !strings.HasSuffix(model, ")") {
+		return modelSuffixResult{ModelName: model, HasSuffix: false}
+	}
+
+	modelName := model[:lastOpen]
+	rawSuffix := model[lastOpen+1 : len(model)-1]
+	modelName = stripBracketSuffix(modelName)
+
+	return modelSuffixResult{
+		ModelName: modelName,
+		HasSuffix: true,
+		RawSuffix: rawSuffix,
 	}
 }

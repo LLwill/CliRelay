@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"net/http"
 	"net/url"
@@ -105,25 +102,22 @@ func (e *BedrockExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 		return resp, err
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	translatorStreamMode := from != to
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, translatorStreamMode)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, translatorStreamMode)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	translatorStreamMode := opts.SourceFormat != to
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat:      to,
+		TranslateAsStream: translatorStreamMode,
+	})
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
+
+	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
+	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
+	body, err = thinking.ApplyThinking(body, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = execCtx.ApplyPayloadConfig(body, originalTranslated)
 	body = disableThinkingIfToolChoiceForced(body)
 	betaTokens := resolveBedrockBetaTokens(opts.Headers.Get("anthropic-beta"), body, mappedModel)
 	bodyForTranslation := body
@@ -132,10 +126,10 @@ func (e *BedrockExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 		return resp, err
 	}
 
-	httpResp, err := e.doBedrockRequest(ctx, auth, mappedModel, false, body)
+	recorder := execCtx.Recorder()
+	httpResp, err := e.doBedrockRequest(execCtx, mappedModel, false, body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), err.Error())
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
 		return resp, err
 	}
 	defer func() {
@@ -143,24 +137,24 @@ func (e *BedrockExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 			log.Errorf("bedrock executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recorder.RecordResponseMetadata(httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), string(b))
+		recorder.AppendResponseChunk(b)
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	data, err := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recorder.RecordResponseError(err)
 		return resp, err
 	}
 	data = transformBedrockInvocationMetrics(data)
-	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publishWithContent(ctx, parseClaudeUsage(data), string(req.Payload), string(data))
+	recorder.AppendResponseChunk(data)
+	reporter.publishWithContent(execCtx.Context, parseClaudeUsage(data), string(req.Payload), string(data))
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, data, &param)
+	out := sdktranslator.TranslateNonStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, opts.OriginalRequest, bodyForTranslation, data, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -176,24 +170,21 @@ func (e *BedrockExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 		return nil, err
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, true)
-	bodyForTranslation := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	bodyForTranslation, _ = sjson.SetBytes(bodyForTranslation, "model", baseModel)
-	bodyForTranslation, err = thinking.ApplyThinking(bodyForTranslation, req.Model, from.String(), to.String(), e.Identifier())
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat:      to,
+		TranslateAsStream: true,
+	})
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
+
+	bodyForTranslation, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
+	bodyForTranslation, _ = sjson.SetBytes(bodyForTranslation, "model", execCtx.BaseModel)
+	bodyForTranslation, err = thinking.ApplyThinking(bodyForTranslation, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	bodyForTranslation = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", bodyForTranslation, originalTranslated, requestedModel)
+	bodyForTranslation = execCtx.ApplyPayloadConfig(bodyForTranslation, originalTranslated)
 	bodyForTranslation = disableThinkingIfToolChoiceForced(bodyForTranslation)
 	betaTokens := resolveBedrockBetaTokens(opts.Headers.Get("anthropic-beta"), bodyForTranslation, mappedModel)
 	body, err := prepareBedrockRequestBody(bodyForTranslation, mappedModel, betaTokens)
@@ -201,17 +192,17 @@ func (e *BedrockExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 		return nil, err
 	}
 
-	httpResp, err := e.doBedrockRequest(ctx, auth, mappedModel, true, body)
+	recorder := execCtx.Recorder()
+	httpResp, err := e.doBedrockRequest(execCtx, mappedModel, true, body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), err.Error())
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recorder.RecordResponseMetadata(httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		reporter.publishFailureWithContent(ctx, string(req.Payload), string(b))
+		recorder.AppendResponseChunk(b)
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("bedrock executor: close response body error: %v", errClose)
 		}
@@ -235,15 +226,15 @@ func (e *BedrockExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 			payload, errDecode := decoder.Decode()
 			if errDecode != nil {
 				if errors.Is(errDecode, io.EOF) {
-					reporter.ensurePublished(ctx)
+					reporter.ensurePublished(execCtx.Context)
 					return
 				}
-				recordAPIResponseError(ctx, e.cfg, errDecode)
-				reporter.publishFailure(ctx)
+				recorder.RecordResponseError(errDecode)
+				reporter.publishFailure(execCtx.Context)
 				out <- cliproxyexecutor.StreamChunk{Err: errDecode}
 				return
 			}
-			appendAPIResponseChunk(ctx, e.cfg, payload)
+			recorder.AppendResponseChunk(payload)
 			sseData := extractBedrockChunkData(payload)
 			if len(sseData) == 0 {
 				continue
@@ -252,9 +243,9 @@ func (e *BedrockExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 			line := []byte("data: " + string(sseData))
 			reporter.appendOutputChunk(line)
 			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				reporter.publish(execCtx.Context, detail)
 			}
-			if from == to {
+			if execCtx.SourceFormat == to {
 				eventType := gjson.GetBytes(sseData, "type").String()
 				if eventType != "" {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte("event: " + eventType + "\n")}
@@ -262,7 +253,7 @@ func (e *BedrockExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 				out <- cliproxyexecutor.StreamChunk{Payload: append(line, '\n', '\n')}
 				continue
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, line, &param)
+			chunks := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, opts.OriginalRequest, bodyForTranslation, line, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
@@ -287,39 +278,27 @@ func (e *BedrockExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) 
 	return auth, nil
 }
 
-func (e *BedrockExecutor) doBedrockRequest(ctx context.Context, auth *cliproxyauth.Auth, modelID string, stream bool, body []byte) (*http.Response, error) {
-	region := bedrockRegion(auth)
-	targetURL := buildBedrockURL(bedrockAttr(auth, "base_url"), region, modelID, stream)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+func (e *BedrockExecutor) doBedrockRequest(execCtx *ExecutionContext, modelID string, stream bool, body []byte) (*http.Response, error) {
+	region := bedrockRegion(execCtx.Auth)
+	targetURL := buildBedrockURL(bedrockAttr(execCtx.Auth, "base_url"), region, modelID, stream)
+	httpReq, err := http.NewRequestWithContext(execCtx.Context, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "cli-proxy-bedrock")
-	if err := e.prepareBedrockHTTPRequest(ctx, httpReq, auth, body); err != nil {
+	if err := e.prepareBedrockHTTPRequest(execCtx.Context, httpReq, execCtx.Auth, body); err != nil {
 		return nil, err
 	}
-
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
+	recorder := execCtx.Recorder()
+	recorder.RecordRequest(targetURL, http.MethodPost, httpReq.Header.Clone(), body)
+	httpResp, err := execCtx.HTTPClient(0).Do(httpReq)
+	if err != nil {
+		recorder.RecordResponseError(err)
+		return nil, err
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       targetURL,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return httpResp, nil
 }
 
 func (e *BedrockExecutor) prepareBedrockHTTPRequest(ctx context.Context, req *http.Request, auth *cliproxyauth.Auth, body []byte) error {
@@ -628,137 +607,6 @@ func escapeGJSONPathSegment(segment string) string {
 		return strings.ReplaceAll(segment, ".", "\\.")
 	}
 	return segment
-}
-
-func extractBedrockChunkData(payload []byte) []byte {
-	b64 := gjson.GetBytes(payload, "bytes").String()
-	if b64 == "" {
-		return nil
-	}
-	decoded, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil
-	}
-	return decoded
-}
-
-func transformBedrockInvocationMetrics(data []byte) []byte {
-	metrics := gjson.GetBytes(data, "amazon-bedrock-invocationMetrics")
-	if !metrics.Exists() || !metrics.IsObject() {
-		return data
-	}
-	data, _ = sjson.DeleteBytes(data, "amazon-bedrock-invocationMetrics")
-	if gjson.GetBytes(data, "usage").Exists() {
-		return data
-	}
-	if inputTokens := metrics.Get("inputTokenCount"); inputTokens.Exists() {
-		data, _ = sjson.SetBytes(data, "usage.input_tokens", inputTokens.Int())
-	}
-	if outputTokens := metrics.Get("outputTokenCount"); outputTokens.Exists() {
-		data, _ = sjson.SetBytes(data, "usage.output_tokens", outputTokens.Int())
-	}
-	return data
-}
-
-type bedrockEventStreamDecoder struct {
-	reader io.Reader
-}
-
-func newBedrockEventStreamDecoder(r io.Reader) *bedrockEventStreamDecoder {
-	return &bedrockEventStreamDecoder{reader: r}
-}
-
-func (d *bedrockEventStreamDecoder) Decode() ([]byte, error) {
-	for {
-		prelude := make([]byte, 12)
-		if _, err := io.ReadFull(d.reader, prelude); err != nil {
-			return nil, err
-		}
-		expectedPreludeCRC := binary.BigEndian.Uint32(prelude[8:12])
-		if crc32.ChecksumIEEE(prelude[:8]) != expectedPreludeCRC {
-			return nil, fmt.Errorf("bedrock eventstream: invalid prelude crc")
-		}
-		totalLen := binary.BigEndian.Uint32(prelude[0:4])
-		headersLen := binary.BigEndian.Uint32(prelude[4:8])
-		if totalLen < 16 || headersLen > totalLen-16 {
-			return nil, fmt.Errorf("bedrock eventstream: invalid frame length")
-		}
-		rest := make([]byte, int(totalLen)-12)
-		if _, err := io.ReadFull(d.reader, rest); err != nil {
-			return nil, err
-		}
-		frameWithoutMessageCRC := append(bytes.Clone(prelude), rest[:len(rest)-4]...)
-		expectedMessageCRC := binary.BigEndian.Uint32(rest[len(rest)-4:])
-		if crc32.ChecksumIEEE(frameWithoutMessageCRC) != expectedMessageCRC {
-			return nil, fmt.Errorf("bedrock eventstream: invalid message crc")
-		}
-		headers := rest[:headersLen]
-		payload := rest[headersLen : len(rest)-4]
-		eventHeaders := parseBedrockEventStreamHeaders(headers)
-		if eventHeaders.eventType == "chunk" {
-			return payload, nil
-		}
-		if err := bedrockEventStreamException(eventHeaders, payload); err != nil {
-			return nil, err
-		}
-	}
-}
-
-type bedrockEventStreamHeaders struct {
-	eventType     string
-	messageType   string
-	exceptionType string
-}
-
-func parseBedrockEventStreamHeaders(headers []byte) bedrockEventStreamHeaders {
-	out := bedrockEventStreamHeaders{}
-	for len(headers) > 0 {
-		nameLen := int(headers[0])
-		headers = headers[1:]
-		if len(headers) < nameLen+3 {
-			return out
-		}
-		name := string(headers[:nameLen])
-		headers = headers[nameLen:]
-		valueType := headers[0]
-		headers = headers[1:]
-		if valueType != 7 || len(headers) < 2 {
-			return out
-		}
-		valueLen := int(binary.BigEndian.Uint16(headers[:2]))
-		headers = headers[2:]
-		if len(headers) < valueLen {
-			return out
-		}
-		value := string(headers[:valueLen])
-		headers = headers[valueLen:]
-		switch name {
-		case ":event-type":
-			out.eventType = value
-		case ":message-type":
-			out.messageType = value
-		case ":exception-type":
-			out.exceptionType = value
-		}
-	}
-	return out
-}
-
-func bedrockEventStreamException(headers bedrockEventStreamHeaders, payload []byte) error {
-	eventType := strings.TrimSpace(headers.eventType)
-	exceptionType := strings.TrimSpace(headers.exceptionType)
-	messageType := strings.TrimSpace(headers.messageType)
-	lowerEvent := strings.ToLower(eventType)
-	isException := strings.EqualFold(messageType, "exception") ||
-		exceptionType != "" ||
-		strings.Contains(lowerEvent, "exception") ||
-		strings.Contains(lowerEvent, "error")
-	if !isException {
-		return nil
-	}
-	errorType := firstNonEmpty(exceptionType, eventType, messageType, "exception")
-	message := firstNonEmpty(gjson.GetBytes(payload, "message").String(), gjson.GetBytes(payload, "Message").String(), string(payload))
-	return fmt.Errorf("bedrock eventstream %s: %s", errorType, message)
 }
 
 func bedrockAuthMode(auth *cliproxyauth.Auth) string {
