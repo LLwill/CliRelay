@@ -3,6 +3,7 @@ package modelcatalog
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
@@ -10,6 +11,7 @@ import (
 )
 
 var ErrModelIDRequired = errors.New("model id is required")
+var ErrAuthGroupRequired = errors.New("auth group is required")
 
 // Config contract:
 // - Owner: model config / owner preset / pricing management boundary.
@@ -81,6 +83,54 @@ func (s *Service) ReplaceOwnerPresets(rows []usage.ModelOwnerPresetRow) (map[str
 		return nil, err
 	}
 	return map[string]any{"status": "ok", "updated": len(rows)}, nil
+}
+
+func (s *Service) AuthGroupOwnerMappings() map[string]any {
+	rows := modelconfigsettings.ListAuthGroupOwnerMappings()
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, map[string]any{
+			"auth_group": row.AuthGroup,
+			"owner":      row.Owner,
+			"updated_at": row.UpdatedAt,
+		})
+	}
+	return map[string]any{"items": items}
+}
+
+func (s *Service) PatchAuthGroupOwnerMapping(authGroup, owner string) (map[string]any, error) {
+	authGroup = strings.TrimSpace(authGroup)
+	owner = strings.TrimSpace(owner)
+	if authGroup == "" {
+		return nil, ErrAuthGroupRequired
+	}
+	if owner == "" {
+		if err := modelconfigsettings.DeleteAuthGroupOwnerMapping(authGroup); err != nil {
+			if errors.Is(err, modelconfigsettings.ErrAuthGroupRequired) {
+				return nil, ErrAuthGroupRequired
+			}
+			return nil, err
+		}
+		return map[string]any{
+			"status":     "ok",
+			"auth_group": strings.ToLower(strings.Join(strings.Fields(authGroup), "-")),
+			"deleted":    true,
+		}, nil
+	}
+
+	saved, err := modelconfigsettings.UpsertAuthGroupOwnerMapping(authGroup, owner)
+	if err != nil {
+		if errors.Is(err, modelconfigsettings.ErrAuthGroupRequired) {
+			return nil, ErrAuthGroupRequired
+		}
+		return nil, err
+	}
+	return map[string]any{
+		"status":     "ok",
+		"auth_group": saved.AuthGroup,
+		"owner":      saved.Owner,
+		"updated_at": saved.UpdatedAt,
+	}, nil
 }
 
 func (s *Service) Pricing() map[string]any {

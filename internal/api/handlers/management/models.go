@@ -154,6 +154,33 @@ func (h *ModelsHandler) PutModelOwnerPresets(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
+// GetAuthGroupModelOwnerMappings returns persisted auth-group to model-owner mappings.
+func (h *ModelsHandler) GetAuthGroupModelOwnerMappings(c *gin.Context) {
+	c.JSON(http.StatusOK, h.service().AuthGroupOwnerMappings())
+}
+
+// PatchAuthGroupModelOwnerMapping upserts or deletes a persisted auth-group to model-owner mapping.
+func (h *ModelsHandler) PatchAuthGroupModelOwnerMapping(c *gin.Context) {
+	var body struct {
+		AuthGroup string `json:"auth_group"`
+		Owner     string `json:"owner"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	payload, err := h.service().PatchAuthGroupOwnerMapping(body.AuthGroup, body.Owner)
+	if err != nil {
+		if errors.Is(err, modelcatalog.ErrAuthGroupRequired) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
 // GetModelPricing returns all model pricing entries.
 func (h *ModelsHandler) GetModelPricing(c *gin.Context) {
 	c.JSON(http.StatusOK, h.service().Pricing())

@@ -68,6 +68,15 @@ CREATE TABLE IF NOT EXISTS model_owner_presets (
   updated_at  DATETIME NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS auth_group_model_owner_mappings (
+  auth_group TEXT PRIMARY KEY,
+  owner      TEXT NOT NULL DEFAULT '',
+  updated_at DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_group_model_owner_mappings_owner
+  ON auth_group_model_owner_mappings(owner);
+
 CREATE TABLE IF NOT EXISTS model_openrouter_sync_state (
   id               INTEGER PRIMARY KEY CHECK(id = 1),
   enabled          INTEGER NOT NULL DEFAULT 0,
@@ -132,6 +141,7 @@ func InitTables(db *sql.DB) {
 	mergeLegacyPricingIntoModelConfigs(db)
 	reloadModelConfigCache(db)
 	reloadModelOwnerPresetCache(db)
+	reloadAuthGroupOwnerMappingCache(db)
 }
 
 func NormalizeModelOwnerValue(value string) string {

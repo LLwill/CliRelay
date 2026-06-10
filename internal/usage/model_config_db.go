@@ -15,6 +15,7 @@ import (
 // - Exit condition: remaining callers move to modelconfig settings or narrower bridges; do not add new imports here.
 type ModelConfigRow = sqlmodelconfig.ModelConfigRow
 type ModelOwnerPresetRow = sqlmodelconfig.ModelOwnerPresetRow
+type AuthGroupOwnerMappingRow = sqlmodelconfig.AuthGroupOwnerMappingRow
 
 func initModelConfigTables(db *sql.DB) {
 	sqlmodelconfig.InitTables(db)
@@ -26,6 +27,10 @@ func modelConfigStore() sqlmodelconfig.Store {
 
 func normalizeModelOwnerValue(value string) string {
 	return sqlmodelconfig.NormalizeModelOwnerValue(value)
+}
+
+func normalizeAuthGroupKey(value string) string {
+	return sqlmodelconfig.NormalizeAuthGroupKey(value)
 }
 
 func normalizePricingMode(mode string) string {
@@ -132,4 +137,20 @@ func UpsertModelOwnerPreset(row ModelOwnerPresetRow) error {
 
 func ReplaceModelOwnerPresets(rows []ModelOwnerPresetRow) error {
 	return modelConfigStore().ReplaceModelOwnerPresets(rows)
+}
+
+func ListAuthGroupOwnerMappings() []AuthGroupOwnerMappingRow {
+	return modelConfigStore().ListAuthGroupOwnerMappings()
+}
+
+func GetAuthGroupOwnerMapping(authGroup string) (AuthGroupOwnerMappingRow, bool) {
+	return modelConfigStore().GetAuthGroupOwnerMapping(authGroup)
+}
+
+func UpsertAuthGroupOwnerMapping(row AuthGroupOwnerMappingRow) error {
+	return modelConfigStore().UpsertAuthGroupOwnerMapping(row)
+}
+
+func DeleteAuthGroupOwnerMapping(authGroup string) error {
+	return modelConfigStore().DeleteAuthGroupOwnerMapping(authGroup)
 }

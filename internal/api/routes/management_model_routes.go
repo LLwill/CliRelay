@@ -16,6 +16,8 @@ func registerManagementModelRoutes(group *gin.RouterGroup, h *managementhandlers
 	group.DELETE("/model-configs/*id", models.DeleteModelConfig)
 	group.GET("/model-owner-presets", models.GetModelOwnerPresets)
 	group.PUT("/model-owner-presets", models.PutModelOwnerPresets)
+	group.GET("/auth-group-model-owner-mappings", models.GetAuthGroupModelOwnerMappings)
+	group.PATCH("/auth-group-model-owner-mappings", models.PatchAuthGroupModelOwnerMapping)
 	group.GET("/model-openrouter-sync", models.GetOpenRouterModelSync)
 	group.PUT("/model-openrouter-sync", models.PutOpenRouterModelSync)
 	group.POST("/model-openrouter-sync/run", models.PostOpenRouterModelSyncRun)

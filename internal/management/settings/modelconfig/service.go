@@ -11,6 +11,7 @@ import (
 )
 
 var ErrModelIDRequired = errors.New("model id is required")
+var ErrAuthGroupRequired = errors.New("auth group is required")
 
 type UpsertConfigInput struct {
 	OriginalID                string
@@ -153,6 +154,36 @@ func ListOwnerPresetsWithCounts() []OwnerPresetWithCount {
 
 func ReplaceOwnerPresets(rows []usage.ModelOwnerPresetRow) error {
 	return usage.ReplaceModelOwnerPresets(rows)
+}
+
+func ListAuthGroupOwnerMappings() []usage.AuthGroupOwnerMappingRow {
+	return usage.ListAuthGroupOwnerMappings()
+}
+
+func UpsertAuthGroupOwnerMapping(authGroup, owner string) (usage.AuthGroupOwnerMappingRow, error) {
+	row := usage.AuthGroupOwnerMappingRow{
+		AuthGroup: strings.TrimSpace(authGroup),
+		Owner:     strings.TrimSpace(owner),
+	}
+	if row.AuthGroup == "" {
+		return usage.AuthGroupOwnerMappingRow{}, ErrAuthGroupRequired
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(row); err != nil {
+		return usage.AuthGroupOwnerMappingRow{}, err
+	}
+	saved, ok := usage.GetAuthGroupOwnerMapping(row.AuthGroup)
+	if !ok {
+		return row, nil
+	}
+	return saved, nil
+}
+
+func DeleteAuthGroupOwnerMapping(authGroup string) error {
+	authGroup = strings.TrimSpace(authGroup)
+	if authGroup == "" {
+		return ErrAuthGroupRequired
+	}
+	return usage.DeleteAuthGroupOwnerMapping(authGroup)
 }
 
 func ListPricing() []usage.ModelPricingRow {

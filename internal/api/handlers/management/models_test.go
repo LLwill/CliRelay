@@ -243,6 +243,57 @@ func TestModelOwnerPresetHandlersReplacePresets(t *testing.T) {
 	}
 }
 
+func TestAuthGroupModelOwnerMappingHandlersPatchAndList(t *testing.T) {
+	initManagementModelsTestDB(t)
+	h := NewHandler(&config.Config{}, "", nil)
+
+	patchRec := performModelsRequest(
+		http.MethodPatch,
+		"/auth-group-model-owner-mappings",
+		[]byte(`{"auth_group":"claude","owner":"anthropic"}`),
+		h.Models().PatchAuthGroupModelOwnerMapping,
+	)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthGroupModelOwnerMapping status = %d body = %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	listRec := performModelsRequest(
+		http.MethodGet,
+		"/auth-group-model-owner-mappings",
+		nil,
+		h.Models().GetAuthGroupModelOwnerMappings,
+	)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GetAuthGroupModelOwnerMappings status = %d body = %s", listRec.Code, listRec.Body.String())
+	}
+
+	var listPayload struct {
+		Items []struct {
+			AuthGroup string `json:"auth_group"`
+			Owner     string `json:"owner"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("unmarshal auth group owner mapping list: %v", err)
+	}
+	if len(listPayload.Items) != 1 || listPayload.Items[0].AuthGroup != "claude" || listPayload.Items[0].Owner != "anthropic" {
+		t.Fatalf("unexpected auth group owner mapping list: %+v", listPayload.Items)
+	}
+
+	deleteRec := performModelsRequest(
+		http.MethodPatch,
+		"/auth-group-model-owner-mappings",
+		[]byte(`{"auth_group":"claude","owner":""}`),
+		h.Models().PatchAuthGroupModelOwnerMapping,
+	)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthGroupModelOwnerMapping delete status = %d body = %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, ok := usage.GetAuthGroupOwnerMapping("claude"); ok {
+		t.Fatal("expected claude auth group owner mapping to be deleted")
+	}
+}
+
 func TestGetModelPathAvailabilityIncludesRootAndConfiguredPath(t *testing.T) {
 	modelID := "model-path-availability-test"
 	reg := registry.GetGlobalRegistry()
