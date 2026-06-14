@@ -64,10 +64,18 @@ func (h *Handler) PutIdentityFingerprint(c *gin.Context) {
 	if h.cfg == nil {
 		h.cfg = &config.Config{}
 	}
+	previous := h.cfg.IdentityFingerprint
 	h.cfg.IdentityFingerprint = body
 	h.mu.Unlock()
 
-	h.persistRuntimeSetting(c, settingsstore.RuntimeSettingIdentityFingerprint, body)
+	if !h.persistRuntimeSetting(c, settingsstore.RuntimeSettingIdentityFingerprint, body) {
+		h.mu.Lock()
+		if h.cfg != nil {
+			h.cfg.IdentityFingerprint = previous
+		}
+		h.mu.Unlock()
+		return
+	}
 }
 
 func (h *Handler) GetCodexFingerprintRecommendations(c *gin.Context) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 func TestPutIdentityFingerprintPersistsToSQLite(t *testing.T) {
@@ -59,6 +60,39 @@ func TestPutIdentityFingerprintPersistsToSQLite(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "logging-to-file: true") {
 		t.Fatalf("ordinary config should remain in YAML:\n%s", string(data))
+	}
+}
+
+func TestPutIdentityFingerprintFailsWhenRuntimeSettingCannotPersist(t *testing.T) {
+	usage.CloseDB()
+
+	configPath := t.TempDir()
+	h := NewHandler(&config.Config{
+		IdentityFingerprint: config.IdentityFingerprintConfig{
+			Codex: config.CodexIdentityFingerprintConfig{
+				Enabled:   false,
+				UserAgent: "codex_cli_rs/old",
+			},
+		},
+	}, configPath, nil)
+
+	rec := performModelsRequest(http.MethodPut, "/identity-fingerprint", []byte(`{
+		"codex": {
+			"enabled": true,
+			"user-agent": "codex_cli_rs/0.125.0",
+			"originator": "codex_cli_rs",
+			"session-mode": "per-request"
+		},
+		"claude": {
+			"enabled": false,
+			"session-mode": "per-request"
+		}
+	}`), h.PutIdentityFingerprint)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("PutIdentityFingerprint status = %d, want %d, body = %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if h.cfg.IdentityFingerprint.Codex.Enabled || h.cfg.IdentityFingerprint.Codex.UserAgent != "codex_cli_rs/old" {
+		t.Fatalf("identity fingerprint should be rolled back after persist failure, got %#v", h.cfg.IdentityFingerprint.Codex)
 	}
 }
 

@@ -98,6 +98,46 @@ func TestQueryCodexFingerprintRecommendationsAggregatesStableHeaders(t *testing.
 	}
 }
 
+func TestInitDBCreatesCodexFingerprintRecommendationDetailIndex(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{
+		StoreContent:           true,
+		ContentRetentionDays:   30,
+		CleanupIntervalMinutes: 1440,
+	})
+
+	rows, err := getDB().Query("PRAGMA index_list(request_log_content)")
+	if err != nil {
+		t.Fatalf("PRAGMA index_list(request_log_content): %v", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var (
+			seq     int
+			name    string
+			unique  int
+			origin  string
+			partial int
+		)
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		if name == "idx_log_content_detail_timestamp" {
+			found = true
+			if partial != 1 {
+				t.Fatalf("idx_log_content_detail_timestamp partial = %d, want 1", partial)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
+	}
+	if !found {
+		t.Fatal("idx_log_content_detail_timestamp was not created")
+	}
+}
+
 func TestQueryCodexFingerprintRecommendationsSortsByCountThenRecent(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{
 		StoreContent:           true,

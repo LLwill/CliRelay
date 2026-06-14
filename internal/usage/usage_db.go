@@ -311,6 +311,16 @@ func migrateRequestLogDetailColumn(db *sql.DB) {
 	}
 }
 
+func ensureRequestLogDetailIndexes(db *sql.DB) {
+	if _, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_log_content_detail_timestamp
+		ON request_log_content(timestamp DESC)
+		WHERE length(detail_content) > 0
+	`); err != nil {
+		log.Warnf("usage: create idx_log_content_detail_timestamp: %v", err)
+	}
+}
+
 // InitDB opens (or creates) the SQLite database at the given path and creates
 // the request_logs table if it doesn't exist.
 func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.Location) error {
@@ -384,6 +394,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateFirstTokenColumn(db)
 	log.Debugf("usage: running request log detail column migration")
 	migrateRequestLogDetailColumn(db)
+	log.Debugf("usage: ensuring request log detail indexes")
+	ensureRequestLogDetailIndexes(db)
 	log.Debugf("usage: initializing pricing table")
 	initPricingTable(db)
 	log.Debugf("usage: initializing model config tables")

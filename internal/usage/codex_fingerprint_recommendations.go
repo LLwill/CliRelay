@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -21,6 +22,7 @@ const (
 	maxCodexFingerprintRecommendationLimit     = 1000
 	maxCodexFingerprintSamples                 = 3
 	maxCodexFingerprintDisplayValue            = 240
+	codexFingerprintRecommendationQueryTimeout = 8 * time.Second
 )
 
 type CodexFingerprintRecommendationQuery struct {
@@ -202,15 +204,23 @@ func normalizeCodexFingerprintRecommendationQuery(params CodexFingerprintRecomme
 
 func queryRecentCodexFingerprintDetailRows(db *sql.DB, params CodexFingerprintRecommendationQuery) ([]codexFingerprintDetailRow, error) {
 	cutoff := CutoffStartUTC(params.Days).Format(time.RFC3339)
-	rows, err := db.Query(
-		`SELECT logs.id, logs.timestamp, logs.model, logs.source, logs.channel_name, logs.auth_index,
-		        logs.failed, content.compression, content.detail_content
-		   FROM request_logs logs
-		   JOIN request_log_content content ON content.log_id = logs.id
-		  WHERE logs.timestamp >= ?
-		    AND length(content.detail_content) > 0
-		  ORDER BY logs.timestamp DESC
-		  LIMIT ?`,
+	ctx, cancel := context.WithTimeout(context.Background(), codexFingerprintRecommendationQueryTimeout)
+	defer cancel()
+	rows, err := db.QueryContext(
+		ctx,
+		`WITH recent_content AS (
+		     SELECT log_id, timestamp, compression, detail_content
+		       FROM request_log_content
+		      WHERE timestamp >= ?
+		        AND length(detail_content) > 0
+		      ORDER BY timestamp DESC
+		      LIMIT ?
+		   )
+		 SELECT logs.id, logs.timestamp, logs.model, logs.source, logs.channel_name, logs.auth_index,
+		        logs.failed, recent_content.compression, recent_content.detail_content
+		   FROM recent_content
+		   JOIN request_logs logs ON logs.id = recent_content.log_id
+		  ORDER BY recent_content.timestamp DESC`,
 		cutoff,
 		params.Limit,
 	)
