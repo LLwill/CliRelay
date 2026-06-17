@@ -364,3 +364,38 @@ func TestManagerExecute_GroupStrategyRoundRobinOverridesGlobalFillFirst(t *testi
 		t.Fatalf("group round-robin should rotate scoped route auths, got %v", calls)
 	}
 }
+
+func TestManagerExecute_GlobalSessionStickyKeepsSameSessionOnAuth(t *testing.T) {
+	t.Parallel()
+
+	executor := &successfulSequenceExecutor{}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy:            "session-sticky",
+			IncludeDefaultGroup: false,
+		},
+	})
+	manager.RegisterExecutor(executor)
+	registerGroupedRouteTestAuths(t, manager)
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionStickyMetadataKey: "header:session-id:sess-1",
+		},
+	}
+	for i := 0; i < 2; i++ {
+		resp, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, opts)
+		if err != nil {
+			t.Fatalf("Execute(%d) error = %v", i, err)
+		}
+		if string(resp.Payload) != "ok" {
+			t.Fatalf("Execute(%d) payload = %q, want ok", i, string(resp.Payload))
+		}
+	}
+
+	if calls := executor.Calls(); len(calls) != 2 || calls[0] != "auth-a" || calls[1] != "auth-a" {
+		t.Fatalf("global session-sticky should keep using the first session auth, got %v", calls)
+	}
+}

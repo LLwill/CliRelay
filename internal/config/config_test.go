@@ -136,11 +136,11 @@ func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 
 	cfg := &Config{
 		Routing: RoutingConfig{
-			Strategy: "fill-first",
+			Strategy: "sticky",
 			ChannelGroups: []RoutingChannelGroup{
 				{
 					Name:               " Team ",
-					Strategy:           "round-robin",
+					Strategy:           "sessionsticky",
 					ExcludeFromDefault: true,
 					Match: ChannelGroupMatch{
 						Channels: []string{"Team Channel"},
@@ -160,8 +160,11 @@ func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 
 	cfg.SanitizeRouting()
 
-	if got := cfg.Routing.ChannelGroups[0].Strategy; got != "round-robin" {
-		t.Fatalf("group strategy = %q, want round-robin", got)
+	if got := cfg.Routing.Strategy; got != "session-sticky" {
+		t.Fatalf("global strategy = %q, want session-sticky", got)
+	}
+	if got := cfg.Routing.ChannelGroups[0].Strategy; got != "session-sticky" {
+		t.Fatalf("group strategy = %q, want session-sticky", got)
 	}
 	if got := cfg.Routing.ChannelGroups[1].Strategy; got != "fill-first" {
 		t.Fatalf("group strategy alias = %q, want fill-first", got)

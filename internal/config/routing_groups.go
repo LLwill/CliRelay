@@ -83,6 +83,8 @@ func normalizeChannelPriorities(values map[string]int) map[string]int {
 
 func NormalizeRoutingStrategy(strategy string) string {
 	switch strings.TrimSpace(strings.ToLower(strategy)) {
+	case "session-sticky", "sessionsticky", "sticky", "ss":
+		return "session-sticky"
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first"
 	default:

@@ -140,14 +140,15 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store              Store
-	executors          map[string]ProviderExecutor
-	selector           Selector
-	roundRobinSelector *RoundRobinSelector
-	fillFirstSelector  *FillFirstSelector
-	hook               Hook
-	mu                 sync.RWMutex
-	auths              map[string]*Auth
+	store                 Store
+	executors             map[string]ProviderExecutor
+	selector              Selector
+	roundRobinSelector    *RoundRobinSelector
+	fillFirstSelector     *FillFirstSelector
+	sessionStickySelector *SessionStickySelector
+	hook                  Hook
+	mu                    sync.RWMutex
+	auths                 map[string]*Auth
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -190,20 +191,25 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if fillFirstSelector == nil {
 		fillFirstSelector = &FillFirstSelector{}
 	}
+	sessionStickySelector, _ := selector.(*SessionStickySelector)
+	if sessionStickySelector == nil {
+		sessionStickySelector = NewSessionStickySelector(roundRobinSelector)
+	}
 	if hook == nil {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:              store,
-		executors:          make(map[string]ProviderExecutor),
-		selector:           selector,
-		roundRobinSelector: roundRobinSelector,
-		fillFirstSelector:  fillFirstSelector,
-		hook:               hook,
-		auths:              make(map[string]*Auth),
-		providerOffsets:    make(map[string]int),
-		refreshSemaphore:   make(chan struct{}, refreshMaxConcurrency),
-		quotaProbeAfter:    make(map[string]time.Time),
+		store:                 store,
+		executors:             make(map[string]ProviderExecutor),
+		selector:              selector,
+		roundRobinSelector:    roundRobinSelector,
+		fillFirstSelector:     fillFirstSelector,
+		sessionStickySelector: sessionStickySelector,
+		hook:                  hook,
+		auths:                 make(map[string]*Auth),
+		providerOffsets:       make(map[string]int),
+		refreshSemaphore:      make(chan struct{}, refreshMaxConcurrency),
+		quotaProbeAfter:       make(map[string]time.Time),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(newRuntimeConfigSnapshot(nil))

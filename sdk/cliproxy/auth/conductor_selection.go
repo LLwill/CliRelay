@@ -48,11 +48,17 @@ func (m *Manager) SetSelector(selector Selector) {
 	if fillFirstSelector, ok := selector.(*FillFirstSelector); ok {
 		m.fillFirstSelector = fillFirstSelector
 	}
+	if sessionStickySelector, ok := selector.(*SessionStickySelector); ok {
+		m.sessionStickySelector = sessionStickySelector
+	}
 	if m.roundRobinSelector == nil {
 		m.roundRobinSelector = &RoundRobinSelector{}
 	}
 	if m.fillFirstSelector == nil {
 		m.fillFirstSelector = &FillFirstSelector{}
+	}
+	if m.sessionStickySelector == nil {
+		m.sessionStickySelector = NewSessionStickySelector(m.roundRobinSelector)
 	}
 	m.mu.Unlock()
 }
@@ -62,6 +68,11 @@ func (m *Manager) selectorForRoutingScopeLocked(cfg *runtimeConfigSnapshot, rout
 		return &RoundRobinSelector{}
 	}
 	switch scopedRoutingStrategy(cfg, routeGroup, allowedGroups) {
+	case "session-sticky":
+		if m.sessionStickySelector != nil {
+			return m.sessionStickySelector
+		}
+		return NewSessionStickySelector(m.roundRobinSelector)
 	case "fill-first":
 		if m.fillFirstSelector != nil {
 			return m.fillFirstSelector

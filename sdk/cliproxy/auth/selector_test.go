@@ -60,6 +60,105 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestSessionStickySelectorPick_SticksSameSessionKey(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionStickySelector(&RoundRobinSelector{})
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionStickyMetadataKey: "header:session-id:sess-1",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatal("Pick() returned nil auth")
+	}
+	if first.ID != "a" || second.ID != "a" {
+		t.Fatalf("Pick() auth IDs = [%s %s], want [a a]", first.ID, second.ID)
+	}
+}
+
+func TestSessionStickySelectorPick_FallsBackWithoutSessionKey(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionStickySelector(&RoundRobinSelector{})
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+
+	first, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatal("Pick() returned nil auth")
+	}
+	if first.ID != "a" || second.ID != "b" {
+		t.Fatalf("Pick() auth IDs = [%s %s], want [a b]", first.ID, second.ID)
+	}
+}
+
+func TestSessionStickySelectorPick_RebindsUnavailableAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionStickySelector(&RoundRobinSelector{})
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionStickyMetadataKey: "header:session-id:sess-1",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	if first == nil || first.ID != "a" {
+		t.Fatalf("Pick() first auth = %#v, want a", first)
+	}
+
+	auths[0].Disabled = true
+	second, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	third, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() third error = %v", err)
+	}
+	if second == nil || third == nil {
+		t.Fatal("Pick() returned nil auth")
+	}
+	if second.ID != "b" || third.ID != "b" {
+		t.Fatalf("Pick() auth IDs after disable = [%s %s], want [b b]", second.ID, third.ID)
+	}
+}
+
+func TestSessionStickyKeyUsesPromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-5","prompt_cache_key":"cache-1","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	if got := sessionStickyKey(opts); got != "prompt_cache_key:cache-1" {
+		t.Fatalf("sessionStickyKey() = %q, want prompt_cache_key:cache-1", got)
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 

@@ -38,12 +38,24 @@ func onlyAllowedGroupName(allowedGroups map[string]struct{}) string {
 
 func scopedRoutingStrategy(cfg *runtimeConfigSnapshot, routeGroup string, allowedGroups map[string]struct{}) string {
 	if routeGroup = normalizeGroupName(routeGroup); routeGroup != "" {
-		return channelGroupStrategy(cfg, routeGroup)
+		if strategy := channelGroupStrategy(cfg, routeGroup); strategy != "" {
+			return strategy
+		}
+		return globalRoutingStrategy(cfg)
 	}
 	if allowedGroup := onlyAllowedGroupName(allowedGroups); allowedGroup != "" {
-		return channelGroupStrategy(cfg, allowedGroup)
+		if strategy := channelGroupStrategy(cfg, allowedGroup); strategy != "" {
+			return strategy
+		}
 	}
-	return ""
+	return globalRoutingStrategy(cfg)
+}
+
+func globalRoutingStrategy(cfg *runtimeConfigSnapshot) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Routing.Strategy)
 }
 
 func includeDefaultGroup(cfg *runtimeConfigSnapshot) bool {

@@ -474,6 +474,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	switch normalized {
 	case "", "round-robin", "roundrobin", "rr":
 		return "round-robin", true
+	case "session-sticky", "sessionsticky", "sticky", "ss":
+		return "session-sticky", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
 	default:

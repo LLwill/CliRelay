@@ -12,6 +12,7 @@ import (
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -233,6 +234,20 @@ func TestRequestExecutionMetadata_UsesPathRouteContextFromRequestContext(t *test
 	}
 	if got := meta["route_fallback"]; got != "none" {
 		t.Fatalf("route_fallback = %v, want %q", got, "none")
+	}
+}
+
+func TestRequestExecutionMetadata_CapturesSessionStickyHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session-Id", "sess-1")
+
+	ctx := context.WithValue(context.Background(), util.ContextKeyGin, ginCtx)
+	meta := requestExecutionMetadata(ctx)
+	if got := meta[coreexecutor.SessionStickyMetadataKey]; got != "header:session-id:sess-1" {
+		t.Fatalf("session sticky key = %v, want header:session-id:sess-1", got)
 	}
 }
 

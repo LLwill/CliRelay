@@ -17,6 +17,7 @@ type runtimeConfigSnapshot struct {
 }
 
 type runtimeRoutingConfigSnapshot struct {
+	Strategy            string
 	IncludeDefaultGroup bool
 	ChannelGroups       []runtimeRoutingChannelGroup
 }
@@ -88,6 +89,7 @@ func newRuntimeConfigSnapshot(cfg *sdkconfig.Config) *runtimeConfigSnapshot {
 	}
 	return &runtimeConfigSnapshot{
 		Routing: runtimeRoutingConfigSnapshot{
+			Strategy:            normalizeOptionalRuntimeRoutingStrategy(cfg.Routing.Strategy),
 			IncludeDefaultGroup: cfg.Routing.IncludeDefaultGroup,
 			ChannelGroups:       cloneRuntimeRoutingChannelGroups(cfg.Routing.ChannelGroups),
 		},
@@ -248,6 +250,8 @@ func normalizeOptionalRuntimeRoutingStrategy(strategy string) string {
 	switch strings.ToLower(strings.TrimSpace(strategy)) {
 	case "":
 		return ""
+	case "session-sticky", "sessionsticky", "sticky", "ss":
+		return "session-sticky"
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first"
 	default:
