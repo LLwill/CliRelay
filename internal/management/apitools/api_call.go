@@ -3,8 +3,11 @@ package apitools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -15,6 +18,26 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+var errBlockedAPICallTarget = errors.New("blocked api-call target")
+
+var blockedAPICallPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
 
 func (s *Service) APICall(ctx context.Context, body APICallRequest) (int, any) {
 	method := strings.ToUpper(strings.TrimSpace(body.Method))
@@ -29,6 +52,9 @@ func (s *Service) APICall(ctx context.Context, body APICallRequest) (int, any) {
 	parsedURL, errParseURL := url.Parse(urlStr)
 	if errParseURL != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return http.StatusBadRequest, map[string]any{"error": "invalid url"}
+	}
+	if errValidateURL := validateAPICallURL(ctx, parsedURL); errValidateURL != nil {
+		return http.StatusBadRequest, map[string]any{"error": "blocked url"}
 	}
 
 	authIndex := FirstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
@@ -86,9 +112,18 @@ func (s *Service) APICall(ctx context.Context, body APICallRequest) (int, any) {
 
 	httpClient := util.NewHTTPClient(s.defaultAPICallTimeout())
 	httpClient.Transport = s.APICallTransport(auth)
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return validateAPICallURL(req.Context(), req.URL)
+	}
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
+		if errors.Is(errDo, errBlockedAPICallTarget) {
+			return http.StatusBadRequest, map[string]any{"error": "blocked url"}
+		}
 		log.WithError(errDo).Debug("management APICall request failed")
 		return http.StatusBadGateway, map[string]any{"error": "request failed"}
 	}
@@ -114,6 +149,52 @@ func (s *Service) APICall(ctx context.Context, body APICallRequest) (int, any) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	}
+}
+
+func validateAPICallURL(ctx context.Context, parsedURL *url.URL) error {
+	if parsedURL == nil {
+		return errBlockedAPICallTarget
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return errBlockedAPICallTarget
+	}
+	host := strings.TrimSpace(parsedURL.Hostname())
+	if host == "" {
+		return errBlockedAPICallTarget
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if apiCallAddrBlocked(addr) {
+			return errBlockedAPICallTarget
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addrs) == 0 {
+		return errBlockedAPICallTarget
+	}
+	for _, addr := range addrs {
+		if apiCallAddrBlocked(addr) {
+			return errBlockedAPICallTarget
+		}
+	}
+	return nil
+}
+
+func apiCallAddrBlocked(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	for _, prefix := range blockedAPICallPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func FirstNonEmptyString(values ...*string) string {

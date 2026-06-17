@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,8 @@ const (
 	updateCommandTimeout = 10 * time.Minute
 	maxUpdateLogEntries  = 200
 )
+
+var errRequestedImageNotAllowed = errors.New("requested image is not allowed")
 
 type composeRunner func(ctx context.Context, composeFile string, envFile string, projectName string, service string, reporter updateReporter) error
 
@@ -181,6 +184,13 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := persistRequestedImage(s.envFile, req.Image, req.Tag); err != nil {
+		if errors.Is(err, errRequestedImageNotAllowed) {
+			message := err.Error()
+			log.Print(message)
+			s.setStatus("failed", message)
+			http.Error(w, message, http.StatusBadRequest)
+			return
+		}
 		message := "failed to update env file: " + err.Error()
 		log.Print(message)
 		s.setStatus("failed", message)
@@ -213,17 +223,35 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 func persistRequestedImage(envFile string, image string, tag string) error {
 	imageRef := requestedImageRef(image, tag)
-	if imageRef == "" || strings.TrimSpace(envFile) == "" {
+	if imageRef == "" {
+		if strings.TrimSpace(image) == "" && strings.TrimSpace(tag) == "" {
+			return nil
+		}
+		return fmt.Errorf("%w: invalid image or tag", errRequestedImageNotAllowed)
+	}
+	if strings.TrimSpace(envFile) == "" {
 		return nil
 	}
 
 	data, err := os.ReadFile(envFile)
-	if err != nil && !os.IsNotExist(err) {
+	if os.IsNotExist(err) {
+		return fmt.Errorf("%w: missing configured CLI_PROXY_IMAGE", errRequestedImageNotAllowed)
+	}
+	if err != nil {
 		return err
 	}
 
-	line := "CLI_PROXY_IMAGE=" + imageRef
 	lines := splitEnvLines(string(data))
+	configuredRepo := imageRepository(configuredImageRef(lines))
+	requestedRepo := imageRepository(imageRef)
+	if configuredRepo == "" {
+		return fmt.Errorf("%w: missing configured CLI_PROXY_IMAGE", errRequestedImageNotAllowed)
+	}
+	if requestedRepo != configuredRepo {
+		return fmt.Errorf("%w: %s does not match %s", errRequestedImageNotAllowed, requestedRepo, configuredRepo)
+	}
+
+	line := "CLI_PROXY_IMAGE=" + imageRef
 	replaced := false
 	for i, existing := range lines {
 		if strings.HasPrefix(existing, "CLI_PROXY_IMAGE=") {
@@ -237,6 +265,33 @@ func persistRequestedImage(envFile string, image string, tag string) error {
 	}
 	content := strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(envFile, []byte(content), 0o600)
+}
+
+func configuredImageRef(lines []string) string {
+	for _, line := range lines {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "CLI_PROXY_IMAGE" {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return ""
+}
+
+func imageRepository(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if digestIndex := strings.Index(ref, "@"); digestIndex >= 0 {
+		return ref[:digestIndex]
+	}
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		return ref[:lastColon]
+	}
+	return ref
 }
 
 func requestedImageRef(image string, tag string) string {
@@ -278,13 +333,13 @@ func isSafeImagePart(value string) bool {
 
 func (s *updaterServer) authorized(r *http.Request) bool {
 	if s.token == "" {
-		return true
+		return false
 	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(strings.ToLower(value), "bearer ") {
 		value = strings.TrimSpace(value[len("Bearer "):])
 	}
-	return value == s.token
+	return subtle.ConstantTimeCompare([]byte(value), []byte(s.token)) == 1
 }
 
 func (s *updaterServer) startUpdate(service string, req updateRequest) uint64 {

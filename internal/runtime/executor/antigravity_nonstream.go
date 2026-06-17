@@ -136,6 +136,7 @@ attemptLoop:
 			}
 
 			out := make(chan cliproxyexecutor.StreamChunk)
+			reporter.setInputContent(string(req.Payload))
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
@@ -148,6 +149,7 @@ attemptLoop:
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					recorder.AppendResponseChunk(line)
+					reporter.appendOutputChunk(line)
 
 					line = FilterSSEUsageMetadata(line)
 
@@ -183,7 +185,7 @@ attemptLoop:
 			}
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
-			reporter.publish(execCtx.Context, parseAntigravityUsage(resp.Payload))
+			reporter.publishWithContent(execCtx.Context, parseAntigravityUsage(resp.Payload), string(req.Payload), string(resp.Payload))
 			var param any
 			converted := sdktranslator.TranslateNonStream(execCtx.Context, execCtx.Execution.TargetFormat, execCtx.SourceFormat, req.Model, execCtx.OriginalPayload, translated, resp.Payload, &param)
 			resp = cliproxyexecutor.Response{Payload: []byte(converted), Headers: httpResp.Header.Clone()}

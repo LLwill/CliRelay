@@ -13,11 +13,32 @@ import (
 	"time"
 )
 
+func setUpdaterAuth(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer secret")
+}
+
 func TestUpdaterRejectsInvalidBearerToken(t *testing.T) {
 	server := newUpdaterServer(updaterConfig{
 		Token: "secret",
 		Runner: func(context.Context, string, string, string, string, updateReporter) error {
 			t.Fatal("runner should not be called")
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/update", strings.NewReader(`{"service":"clirelay"}`))
+	rec := httptest.NewRecorder()
+
+	server.handleUpdate(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestUpdaterRejectsRequestsWhenConfiguredTokenIsEmpty(t *testing.T) {
+	server := newUpdaterServer(updaterConfig{
+		Runner: func(context.Context, string, string, string, string, updateReporter) error {
 			return nil
 		},
 	})
@@ -51,6 +72,7 @@ func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 
 	called := make(chan struct{}, 1)
 	server := newUpdaterServer(updaterConfig{
+		Token:   "secret",
 		EnvFile: envFile,
 		Runner: func(_ context.Context, _ string, _ string, _ string, _ string, reporter updateReporter) error {
 			data, err := os.ReadFile(envFile)
@@ -76,6 +98,7 @@ func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 		"/v1/update",
 		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"latest"}`),
 	)
+	setUpdaterAuth(req)
 	rec := httptest.NewRecorder()
 
 	server.handleUpdate(rec, req)
@@ -92,16 +115,14 @@ func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 }
 
 func TestUpdaterRejectsRequestWhenEnvFileCannotBeUpdated(t *testing.T) {
-	envDir := filepath.Join(t.TempDir(), "readonly")
-	if err := os.Mkdir(envDir, 0o500); err != nil {
-		t.Fatalf("make readonly dir: %v", err)
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.Mkdir(envFile, 0o700); err != nil {
+		t.Fatalf("make env path directory: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Chmod(envDir, 0o700)
-	})
 
 	server := newUpdaterServer(updaterConfig{
-		EnvFile: filepath.Join(envDir, ".env"),
+		Token:   "secret",
+		EnvFile: envFile,
 		Runner: func(_ context.Context, _ string, _ string, _ string, _ string, _ updateReporter) error {
 			t.Fatal("runner should not be called when env file cannot be updated")
 			return nil
@@ -113,6 +134,7 @@ func TestUpdaterRejectsRequestWhenEnvFileCannotBeUpdated(t *testing.T) {
 		"/v1/update",
 		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"dev"}`),
 	)
+	setUpdaterAuth(req)
 	rec := httptest.NewRecorder()
 
 	server.handleUpdate(rec, req)
@@ -122,6 +144,49 @@ func TestUpdaterRejectsRequestWhenEnvFileCannotBeUpdated(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "failed to update env file") {
 		t.Fatalf("body = %q, want env update failure", rec.Body.String())
+	}
+}
+
+func TestUpdaterRejectsRequestedImageRepositoryChange(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:dev\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	called := make(chan struct{}, 1)
+	server := newUpdaterServer(updaterConfig{
+		Token:   "secret",
+		EnvFile: envFile,
+		Runner: func(_ context.Context, _ string, _ string, _ string, _ string, _ updateReporter) error {
+			called <- struct{}{}
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/update",
+		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/attacker/clirelay","tag":"latest"}`),
+	)
+	setUpdaterAuth(req)
+	rec := httptest.NewRecorder()
+
+	server.handleUpdate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if string(data) != "CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:dev\n" {
+		t.Fatalf("env file content = %q, want unchanged", string(data))
+	}
+	select {
+	case <-called:
+		t.Fatal("runner should not be called")
+	default:
 	}
 }
 
@@ -171,8 +236,13 @@ func TestUpdaterAcceptsRequestAndRunsComposeUpdate(t *testing.T) {
 func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 	called := make(chan struct{}, 1)
 	releaseRunner := make(chan struct{})
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:old\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
 	server := newUpdaterServer(updaterConfig{
-		EnvFile: filepath.Join(t.TempDir(), ".env"),
+		Token:   "secret",
+		EnvFile: envFile,
 		Runner: func(_ context.Context, _ string, _ string, _ string, service string, reporter updateReporter) error {
 			reporter.Stage("pulling", "pulling image")
 			reporter.Log("stdout", "docker compose pull "+service)
@@ -189,6 +259,7 @@ func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 		"/v1/update",
 		strings.NewReader(`{"service":"clirelay","image":"ghcr.io/kittors/clirelay","tag":"dev","version":"dev-abcdef1","commit":"abcdef123456","channel":"dev"}`),
 	)
+	setUpdaterAuth(req)
 	rec := httptest.NewRecorder()
 	server.handleUpdate(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -202,7 +273,9 @@ func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 	}
 
 	statusRec := httptest.NewRecorder()
-	server.handleStatus(statusRec, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
+	statusReq := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	setUpdaterAuth(statusReq)
+	server.handleStatus(statusRec, statusReq)
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("status endpoint code = %d, body=%s", statusRec.Code, statusRec.Body.String())
 	}
@@ -232,8 +305,13 @@ func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 
 func TestUpdaterFailsWhenComposePullSkipsTargetService(t *testing.T) {
 	called := make(chan struct{}, 1)
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:old\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
 	server := newUpdaterServer(updaterConfig{
-		EnvFile: filepath.Join(t.TempDir(), ".env"),
+		Token:   "secret",
+		EnvFile: envFile,
 		Runner: func(_ context.Context, _ string, _ string, _ string, service string, reporter updateReporter) error {
 			reporter.Stage("pulling", "pulling image")
 			reporter.Log("stdout", "docker compose pull "+service)
@@ -250,6 +328,7 @@ func TestUpdaterFailsWhenComposePullSkipsTargetService(t *testing.T) {
 		"/v1/update",
 		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"dev","version":"dev-6704f60","commit":"6704f60ee834bce20e22fc65e67868801f483e32","channel":"dev"}`),
 	)
+	setUpdaterAuth(req)
 	rec := httptest.NewRecorder()
 	server.handleUpdate(rec, req)
 	if rec.Code != http.StatusAccepted {

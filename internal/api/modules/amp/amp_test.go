@@ -2,6 +2,7 @@ package amp
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -14,6 +15,15 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 )
+
+func requireAmpAuth(c *gin.Context) {
+	if c.GetHeader("Authorization") != "Bearer client-key" {
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return
+	}
+	c.Set("apiKey", "client-key")
+	c.Next()
+}
 
 func TestAmpModule_Name(t *testing.T) {
 	m := New()
@@ -75,6 +85,51 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	}
 	if m.secretSource == nil {
 		t.Fatal("secretSource should be initialized")
+	}
+}
+
+func TestAmpModule_RootRoutesRequireAuthBeforeProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	upstreamHit := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer upstream.Close()
+
+	m := NewLegacy(sdkaccess.NewManager(), requireAmpAuth)
+	ctx := modules.Context{
+		Engine:      r,
+		BaseHandler: &handlers.BaseAPIHandler{},
+		Config: &config.Config{AmpCode: config.AmpCode{
+			UpstreamURL:    upstream.URL,
+			UpstreamAPIKey: "upstream-key",
+		}},
+		AuthMiddleware: requireAmpAuth,
+	}
+	if err := m.Register(ctx); err != nil {
+		t.Fatalf("register error: %v", err)
+	}
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/threads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	select {
+	case headers := <-upstreamHit:
+		t.Fatalf("upstream should not be reached; got X-Api-Key=%q", headers.Get("X-Api-Key"))
+	default:
 	}
 }
 

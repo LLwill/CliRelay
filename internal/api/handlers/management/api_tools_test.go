@@ -386,7 +386,10 @@ func TestResolveTokenForAuth_Claude_SkipsRefreshWhenTokenValid(t *testing.T) {
 func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "93.184.216.34" {
+			t.Fatalf("unexpected proxy host: %s", r.Host)
+		}
 		if r.URL.Path != "/backend-api/wham/usage" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -399,7 +402,7 @@ func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 			"plan_type": "free",
 		})
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(proxy.Close)
 
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
@@ -424,7 +427,7 @@ func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 	requestBody, err := json.Marshal(map[string]any{
 		"authIndex": registered.Index,
 		"method":    "GET",
-		"url":       upstream.URL + "/backend-api/wham/usage",
+		"url":       "http://93.184.216.34/backend-api/wham/usage",
 		"header": map[string]string{
 			"Authorization": "Bearer $TOKEN$",
 		},
@@ -433,7 +436,7 @@ func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 		t.Fatalf("marshal request body: %v", err)
 	}
 
-	h := &Handler{cfg: &config.Config{}, authManager: manager}
+	h := &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxy.URL}}, authManager: manager}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(requestBody))
@@ -467,23 +470,72 @@ func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 	}
 }
 
+func TestAPICallRejectsLoopbackTarget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{cfg: &config.Config{}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"method":"GET","url":"http://127.0.0.1:1/metadata"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	h.APITools().APICall(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "blocked url") {
+		t.Fatalf("expected blocked url error, got body=%s", rec.Body.String())
+	}
+}
+
+func TestAPICallRejectsRedirectToLoopbackTarget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/metadata", http.StatusFound)
+	}))
+	t.Cleanup(proxy.Close)
+
+	h := &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxy.URL}}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"method":"GET","url":"http://93.184.216.34/redirect"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	h.APITools().APICall(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "blocked url") {
+		t.Fatalf("expected blocked url error, got body=%s", rec.Body.String())
+	}
+}
+
 func TestAPICallRejectsOversizedUpstreamResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write(bytes.Repeat([]byte("a"), int(managementAPICallResponseLimit)+1))
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(proxy.Close)
 
-	h := &Handler{cfg: &config.Config{}}
+	h := &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxy.URL}}}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	body := []byte(`{"method":"GET","url":"` + upstream.URL + `"}`)
+	body := []byte(`{"method":"GET","url":"http://93.184.216.34/large"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	c.Request = req

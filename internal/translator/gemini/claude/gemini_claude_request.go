@@ -78,6 +78,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
 					case "text":
+						if contentResult.Get("text").String() == "" {
+							return true
+						}
 						part := `{"text":""}`
 						part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
@@ -109,11 +112,33 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						part, _ = sjson.Set(part, "functionResponse.name", funcName)
 						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+
+					case "image":
+						sourceResult := contentResult.Get("source")
+						if sourceResult.Get("type").String() != "base64" {
+							return true
+						}
+						inlineData := `{}`
+						if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
+							inlineData, _ = sjson.Set(inlineData, "mimeType", mimeType)
+						}
+						if data := sourceResult.Get("data").String(); data != "" {
+							inlineData, _ = sjson.Set(inlineData, "data", data)
+						}
+						part := `{}`
+						part, _ = sjson.SetRaw(part, "inlineData", inlineData)
+						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 					}
 					return true
 				})
+				if len(gjson.Get(contentJSON, "parts").Array()) == 0 {
+					return true
+				}
 				out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
 			} else if contentsResult.Type == gjson.String {
+				if contentsResult.String() == "" {
+					return true
+				}
 				part := `{"text":""}`
 				part, _ = sjson.Set(part, "text", contentsResult.String())
 				contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
