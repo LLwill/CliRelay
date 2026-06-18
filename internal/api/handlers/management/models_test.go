@@ -334,18 +334,25 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 	initManagementModelsTestDB(t)
 
 	const (
-		authID      = "codex-default-mapped-owner-auth"
-		registryID  = "codex-default-mapped-owner-registry"
-		mappedModel = "mapped-codex-owner-model"
-		oldModel    = "old-codex-registry-model"
+		authID             = "codex-default-mapped-owner-auth"
+		openCodeAuthID     = "opencode-default-mapped-owner-auth"
+		registryID         = "codex-default-mapped-owner-registry"
+		openCodeRegistryID = "opencode-default-mapped-owner-registry"
+		mappedModel        = "mapped-codex-owner-model"
+		oldModel           = "old-codex-registry-model"
+		openCodeModel      = "opencode-provider-model"
 	)
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(registryID, "codex", []*registry.ModelInfo{
 		{ID: oldModel, Object: "model", OwnedBy: "openai", Type: "openai"},
 	})
+	reg.RegisterClient(openCodeRegistryID, "opencode-go", []*registry.ModelInfo{
+		{ID: openCodeModel, Object: "model", OwnedBy: "opencode", Type: "opencode-go"},
+	})
 	t.Cleanup(func() {
 		reg.UnregisterClient(registryID)
+		reg.UnregisterClient(openCodeRegistryID)
 	})
 
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -356,6 +363,14 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 		Status:   coreauth.StatusActive,
 	}); err != nil {
 		t.Fatalf("Register codex auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       openCodeAuthID,
+		Provider: "opencode-go",
+		Label:    "OpenCode Go",
+		Status:   coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("Register opencode auth: %v", err)
 	}
 	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
 		AuthGroup: "codex",
@@ -401,6 +416,9 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 	}
 	if _, ok := ids[mappedModel]; !ok {
 		t.Fatalf("missing mapped owner model %q; ids=%v", mappedModel, ids)
+	}
+	if _, ok := ids[openCodeModel]; !ok {
+		t.Fatalf("missing unmapped provider model %q; ids=%v", openCodeModel, ids)
 	}
 	if _, ok := ids[oldModel]; ok {
 		t.Fatalf("unexpected registry model outside mapped owner %q; ids=%v", oldModel, ids)
