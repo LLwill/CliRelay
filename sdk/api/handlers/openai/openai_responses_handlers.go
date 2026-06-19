@@ -73,6 +73,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	if !ok {
 		return
 	}
+	rawJSON, _, _ = rewriteCcSwitchOpenAIRequestModel(rawJSON, c)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -88,6 +89,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	if !ok {
 		return
 	}
+	rawJSON, _, _ = rewriteCcSwitchOpenAIRequestModel(rawJSON, c)
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {

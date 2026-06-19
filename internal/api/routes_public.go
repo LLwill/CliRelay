@@ -54,6 +54,7 @@ func (s *Server) setupRoutes() {
 	v1.Use(channelGroupAuthorizationMiddleware())
 	v1.Use(middleware.QuotaMiddleware())
 	v1.Use(s.modelRestrictionMiddleware())
+	v1.Use(ccSwitchOpenAIModelMappingMiddleware())
 	v1.Use(SystemPromptMiddleware())
 	registerV1Routes(v1)
 
@@ -63,6 +64,7 @@ func (s *Server) setupRoutes() {
 	groupedV1.Use(channelGroupAuthorizationMiddleware())
 	groupedV1.Use(middleware.QuotaMiddleware())
 	groupedV1.Use(s.modelRestrictionMiddleware())
+	groupedV1.Use(ccSwitchOpenAIModelMappingMiddleware())
 	groupedV1.Use(SystemPromptMiddleware())
 	registerV1Routes(groupedV1)
 

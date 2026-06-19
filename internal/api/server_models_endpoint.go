@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 )
@@ -94,7 +95,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		for _, model := range resp.Data {
 			if id, ok := model["id"].(string); ok {
 				if allowedModels != nil {
-					if _, allowed := allowedModels[id]; !allowed {
+					if !modelInSet(id, allowedModels) && !ccSwitchRequestModelAllowedForTarget(id, routeCtx, allowedModels) {
 						continue
 					}
 				}
@@ -112,27 +113,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		resp.Data = filtered
 
 		if routeCtx != nil && routeCtx.CcSwitch != nil {
-			ccswitchModels := make(map[string]struct{})
-			for _, mapping := range routeCtx.CcSwitch.ModelMappings {
-				target := strings.TrimSpace(mapping.TargetModel)
-				if target != "" {
-					ccswitchModels[target] = struct{}{}
-				}
-			}
-			if dm := strings.TrimSpace(routeCtx.CcSwitch.DefaultModel); dm != "" {
-				ccswitchModels[dm] = struct{}{}
-			}
-			if len(ccswitchModels) > 0 {
-				var ccswitchFiltered []map[string]interface{}
-				for _, model := range resp.Data {
-					if id, ok := model["id"].(string); ok {
-						if _, exists := ccswitchModels[id]; exists {
-							ccswitchFiltered = append(ccswitchFiltered, model)
-						}
-					}
-				}
-				resp.Data = ccswitchFiltered
-			}
+			resp.Data = filterModelsForCcSwitchRoute(resp.Data, routeCtx)
 		}
 
 		filteredJSON, err := json.Marshal(resp)
@@ -146,6 +127,122 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		recorder.ResponseWriter.WriteHeader(http.StatusOK)
 		_, _ = recorder.ResponseWriter.Write(filteredJSON)
 	}
+}
+
+func ccSwitchRequestModelAllowedForTarget(id string, route *internalrouting.PathRouteContext, allowedModels map[string]struct{}) bool {
+	id = strings.TrimSpace(id)
+	if id == "" || route == nil || route.CcSwitch == nil || len(allowedModels) == 0 {
+		return false
+	}
+	for _, mapping := range route.CcSwitch.ModelMappings {
+		target := strings.TrimSpace(mapping.TargetModel)
+		request := strings.TrimSpace(mapping.RequestModel)
+		if target == "" || request == "" || !strings.EqualFold(target, id) {
+			continue
+		}
+		if modelInSet(request, allowedModels) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterModelsForCcSwitchRoute(models []map[string]interface{}, route *internalrouting.PathRouteContext) []map[string]interface{} {
+	if route == nil || route.CcSwitch == nil {
+		return models
+	}
+	if strings.EqualFold(strings.TrimSpace(route.CcSwitch.ClientType), "codex") {
+		return filterCodexModelsForCcSwitchRoute(models, route.CcSwitch)
+	}
+	return filterTargetModelsForCcSwitchRoute(models, route.CcSwitch)
+}
+
+func filterTargetModelsForCcSwitchRoute(models []map[string]interface{}, ccSwitch *internalrouting.CcSwitchRouteContext) []map[string]interface{} {
+	ccswitchModels := make(map[string]struct{})
+	for _, mapping := range ccSwitch.ModelMappings {
+		target := strings.TrimSpace(mapping.TargetModel)
+		if target != "" {
+			ccswitchModels[target] = struct{}{}
+		}
+	}
+	if dm := strings.TrimSpace(ccSwitch.DefaultModel); dm != "" {
+		ccswitchModels[dm] = struct{}{}
+	}
+	if len(ccswitchModels) == 0 {
+		return models
+	}
+	filtered := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		if id, ok := model["id"].(string); ok {
+			if _, exists := ccswitchModels[id]; exists {
+				filtered = append(filtered, model)
+			}
+		}
+	}
+	return filtered
+}
+
+func filterCodexModelsForCcSwitchRoute(models []map[string]interface{}, ccSwitch *internalrouting.CcSwitchRouteContext) []map[string]interface{} {
+	targetToRequests := make(map[string][]string)
+	for _, mapping := range ccSwitch.ModelMappings {
+		request := strings.TrimSpace(mapping.RequestModel)
+		target := strings.TrimSpace(mapping.TargetModel)
+		if request == "" || target == "" {
+			continue
+		}
+		key := strings.ToLower(target)
+		targetToRequests[key] = appendUniqueModel(targetToRequests[key], request)
+	}
+	defaultModel := strings.TrimSpace(ccSwitch.DefaultModel)
+	if len(targetToRequests) == 0 && defaultModel == "" {
+		return models
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(models))
+	seen := make(map[string]struct{})
+	for _, model := range models {
+		id, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+		if requests := targetToRequests[strings.ToLower(strings.TrimSpace(id))]; len(requests) > 0 {
+			for _, request := range requests {
+				appendModelClone(&filtered, seen, model, request)
+			}
+			continue
+		}
+		if defaultModel != "" && strings.EqualFold(strings.TrimSpace(id), defaultModel) {
+			appendModelClone(&filtered, seen, model, defaultModel)
+		}
+	}
+	return filtered
+}
+
+func appendUniqueModel(models []string, model string) []string {
+	for _, existing := range models {
+		if strings.EqualFold(existing, model) {
+			return models
+		}
+	}
+	return append(models, model)
+}
+
+func appendModelClone(models *[]map[string]interface{}, seen map[string]struct{}, model map[string]interface{}, id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	key := strings.ToLower(id)
+	if _, exists := seen[key]; exists {
+		return
+	}
+	seen[key] = struct{}{}
+	clone := make(map[string]interface{}, len(model))
+	for k, v := range model {
+		clone[k] = v
+	}
+	clone["id"] = id
+	*models = append(*models, clone)
 }
 
 // responseRecorder captures the response body for post-processing.

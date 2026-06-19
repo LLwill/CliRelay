@@ -140,6 +140,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		lastRequest = updatedLastRequest
+		requestJSON, _, _ = rewriteCcSwitchOpenAIRequestModel(requestJSON, c)
 
 		if prewarmPayloads, ok := responsesWebsocketPrewarmPayloads(requestJSON); ok {
 			for _, prewarmPayload := range prewarmPayloads {

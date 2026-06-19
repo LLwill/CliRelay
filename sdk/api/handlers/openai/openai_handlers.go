@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,8 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+const ccSwitchOpenAIModelMappingContextKey = "cliproxy.ccswitch_openai_model_mapping"
 
 // OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
 // It holds a pool of clients to interact with the backend service.
@@ -52,6 +55,36 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("openai")
+}
+
+func rewriteCcSwitchOpenAIRequestModel(rawJSON []byte, c *gin.Context) ([]byte, string, bool) {
+	modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if modelName == "" || c == nil {
+		return rawJSON, modelName, false
+	}
+	raw, exists := c.Get(ccSwitchOpenAIModelMappingContextKey)
+	if !exists {
+		return rawJSON, modelName, false
+	}
+	mapping, ok := raw.(map[string]string)
+	if !ok || len(mapping) == 0 {
+		return rawJSON, modelName, false
+	}
+	targetModel := ""
+	for request, target := range mapping {
+		if strings.EqualFold(strings.TrimSpace(request), modelName) {
+			targetModel = strings.TrimSpace(target)
+			break
+		}
+	}
+	if targetModel == "" {
+		return rawJSON, modelName, false
+	}
+	rewritten, err := sjson.SetBytes(rawJSON, "model", targetModel)
+	if err != nil {
+		return rawJSON, modelName, false
+	}
+	return rewritten, targetModel, true
 }
 
 // OpenAIModels handles the /v1/models endpoint.
@@ -99,6 +132,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	if !ok {
 		return
 	}
+	rawJSON, _, _ = rewriteCcSwitchOpenAIRequestModel(rawJSON, c)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -147,6 +181,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	if !ok {
 		return
 	}
+	rawJSON, _, _ = rewriteCcSwitchOpenAIRequestModel(rawJSON, c)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
