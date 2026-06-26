@@ -116,12 +116,9 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 	if opencodeGoNeedsReasoningInjection(req.Model) && sessionID != "" {
 		req.Payload = opencodeGoInjectReasoningContentIntoPayload(req.Payload, req.Model, sessionID)
 	}
-	// Inject Computer Use function tools for models that need them.
-	// Codex Desktop skips mcp__computer_use__ when routing through /v1/messages,
-	// so DeepSeek models don't see Computer Use capabilities.
-	if opencodeGoNeedsReasoningInjection(req.Model) {
-		req.Payload = opencodeGoInjectComputerUseTools(req.Payload)
-	}
+	// Expand Codex MCP namespace tools into concrete function tools for
+	// OpenAI-compatible upstreams that cannot consume Codex namespaces directly.
+	req.Payload = opencodeGoInjectCodexToolBridgeTools(req.Payload)
 	// Strip old base64 screenshots from tool result messages to save context.
 	if opencodeGoNeedsReasoningInjection(req.Model) {
 		req.Payload = opencodeGoStripScreenshots(req.Payload)
@@ -192,12 +189,9 @@ func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 	if opencodeGoNeedsReasoningInjection(req.Model) && sessionID != "" {
 		req.Payload = opencodeGoInjectReasoningContentIntoPayload(req.Payload, req.Model, sessionID)
 	}
-	// Inject Computer Use function tools for models that need them.
-	// Codex Desktop skips mcp__computer_use__ when routing through /v1/messages,
-	// so DeepSeek models don't see Computer Use capabilities.
-	if opencodeGoNeedsReasoningInjection(req.Model) {
-		req.Payload = opencodeGoInjectComputerUseTools(req.Payload)
-	}
+	// Expand Codex MCP namespace tools into concrete function tools for
+	// OpenAI-compatible upstreams that cannot consume Codex namespaces directly.
+	req.Payload = opencodeGoInjectCodexToolBridgeTools(req.Payload)
 	// Strip old base64 screenshots from tool result messages to save context.
 	if opencodeGoNeedsReasoningInjection(req.Model) {
 		req.Payload = opencodeGoStripScreenshots(req.Payload)
