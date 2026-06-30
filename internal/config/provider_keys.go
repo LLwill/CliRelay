@@ -269,3 +269,44 @@ type OpenCodeGoModel struct {
 
 func (m OpenCodeGoModel) GetName() string  { return m.Name }
 func (m OpenCodeGoModel) GetAlias() string { return "" }
+
+const DefaultClineBaseURL = "https://api.cline.bot/api/v1"
+
+// ClineKey represents a ClinePass OpenAI-compatible API key.
+type ClineKey struct {
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Name is a human-readable label for this channel.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// Priority controls selection preference when multiple credentials match.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the OpenAI-compatible base URL. Defaults to DefaultClineBaseURL.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyID references a reusable proxy-pool entry. When valid, it takes precedence over ProxyURL.
+	ProxyID string `yaml:"proxy-id,omitempty" json:"proxy-id,omitempty"`
+
+	// Models defines the Cline model IDs explicitly enabled for this key.
+	Models []ClineModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+type ClineModel struct {
+	Name string `yaml:"name" json:"name"`
+}
+
+func (m ClineModel) GetName() string  { return m.Name }
+func (m ClineModel) GetAlias() string { return "" }

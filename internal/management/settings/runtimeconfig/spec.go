@@ -14,6 +14,7 @@ const (
 	RuntimeSettingClaudeKeys           = "claude-api-key"
 	RuntimeSettingBedrockKeys          = "bedrock-api-key"
 	RuntimeSettingOpenCodeGoKeys       = "opencode-go-api-key"
+	RuntimeSettingClineKeys            = "cline-api-key"
 	RuntimeSettingOpenAICompatibility  = "openai-compatibility"
 	RuntimeSettingVertexCompatKeys     = "vertex-api-key"
 	RuntimeSettingClaudeHeaderDefaults = "claude-header-defaults"
@@ -141,6 +142,28 @@ func Specs() []Spec {
 				holder := &config.Config{OpenCodeGoKey: value}
 				holder.SanitizeOpenCodeGoKeys()
 				cfg.OpenCodeGoKey = holder.OpenCodeGoKey
+				return true
+			},
+		},
+		{
+			Key: RuntimeSettingClineKeys,
+			Meaningful: func(cfg *config.Config) bool {
+				return len(cfg.ClineKey) > 0
+			},
+			Value: func(cfg *config.Config) any {
+				holder := &config.Config{ClineKey: append([]config.ClineKey(nil), cfg.ClineKey...)}
+				holder.SanitizeClineKeys()
+				return holder.ClineKey
+			},
+			Apply: func(cfg *config.Config, raw json.RawMessage) bool {
+				var value []config.ClineKey
+				if err := json.Unmarshal(raw, &value); err != nil {
+					log.Warnf("runtimeconfig: decode %s: %v", RuntimeSettingClineKeys, err)
+					return false
+				}
+				holder := &config.Config{ClineKey: value}
+				holder.SanitizeClineKeys()
+				cfg.ClineKey = holder.ClineKey
 				return true
 			},
 		},

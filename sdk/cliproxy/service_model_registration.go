@@ -158,6 +158,16 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 			excluded = entry.ExcludedModels
 		}
 		models = applyExcludedModels(models, excluded)
+	case "cline":
+		staticModels := sdkmodelcatalog.StaticModelDefinitionsByChannel("cline")
+		models = staticModels
+		if entry := s.resolveConfigClineKey(a); entry != nil && authKind == "apikey" {
+			if len(entry.Models) > 0 {
+				models = buildClineConfigModels(entry, staticModels)
+			}
+			excluded = entry.ExcludedModels
+		}
+		models = applyExcludedModels(models, excluded)
 	case "codex":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("codex")
 		if entry := s.resolveConfigCodexKey(a); entry != nil {

@@ -121,6 +121,9 @@ type Config struct {
 	// OpenCodeGoKey defines OpenCode Go plan API key configurations.
 	OpenCodeGoKey []OpenCodeGoKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
 
+	// ClineKey defines ClinePass API key configurations.
+	ClineKey []ClineKey `yaml:"cline-api-key" json:"cline-api-key"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
