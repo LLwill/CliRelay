@@ -302,6 +302,9 @@ type ClineKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// VisionFallbackModel is used for image requests whose requested model lacks vision support.
+	VisionFallbackModel string `yaml:"vision-fallback-model,omitempty" json:"vision-fallback-model,omitempty"`
 }
 
 type ClineModel struct {

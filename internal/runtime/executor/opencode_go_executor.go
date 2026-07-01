@@ -250,11 +250,15 @@ type opencodeGoVisionFallbackResult struct {
 }
 
 func (e *OpenCodeGoExecutor) applyVisionFallback(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) opencodeGoVisionFallbackResult {
+	return applyVisionFallback(req, opts, opencodeGoVisionFallbackModel(e.cfg, auth))
+}
+
+func applyVisionFallback(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, fallback string) opencodeGoVisionFallbackResult {
 	result := opencodeGoVisionFallbackResult{
 		Request:       req,
 		OriginalModel: payloadRequestedModel(opts, req.Model),
 	}
-	fallback := opencodeGoVisionFallbackModel(e.cfg, auth)
+	fallback = strings.TrimSpace(fallback)
 	if fallback == "" || !opencodeGoCurrentRequestHasImage(req.Payload) {
 		return result
 	}
@@ -274,6 +278,41 @@ func (e *OpenCodeGoExecutor) applyVisionFallback(auth *cliproxyauth.Auth, req cl
 	result.FallbackModel = fallback
 	result.Applied = true
 	return result
+}
+
+func clineVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if fallback := strings.TrimSpace(auth.Attributes["vision_fallback_model"]); fallback != "" {
+			if opencodeGoModelExcluded(fallback, auth.Attributes["excluded_models"]) {
+				return ""
+			}
+			return fallback
+		}
+	}
+	if cfg == nil {
+		return ""
+	}
+	apiKey := ""
+	if auth.Attributes != nil {
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	if apiKey == "" {
+		return ""
+	}
+	for i := range cfg.ClineKey {
+		entry := &cfg.ClineKey[i]
+		if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+			fallback := strings.TrimSpace(entry.VisionFallbackModel)
+			if opencodeGoModelExcluded(fallback, strings.Join(entry.ExcludedModels, ",")) {
+				return ""
+			}
+			return fallback
+		}
+	}
+	return ""
 }
 
 func opencodeGoVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth) string {
@@ -607,10 +646,26 @@ func opencodeGoSupportsNativeVision(model string) bool {
 	if baseModel == "" {
 		return false
 	}
-	if _, ok := opencodeGoKnownNativeVisionModels[baseModel]; ok {
-		return true
+	for _, candidate := range opencodeGoVisionModelCandidates(baseModel) {
+		if _, ok := opencodeGoKnownNativeVisionModels[candidate]; ok {
+			return true
+		}
+		if opencodeGoModelNameImpliesVision(candidate) {
+			return true
+		}
 	}
-	return opencodeGoModelNameImpliesVision(baseModel)
+	return false
+}
+
+func opencodeGoVisionModelCandidates(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx+1 < len(model) {
+		return []string{model, model[idx+1:]}
+	}
+	return []string{model}
 }
 
 func opencodeGoModelNameImpliesVision(model string) bool {
@@ -631,7 +686,12 @@ func opencodeGoModelNameImpliesVision(model string) bool {
 
 func opencodeGoDisablesThinkingForVisionFallback(model string) bool {
 	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	return strings.HasPrefix(baseModel, "qwen")
+	for _, candidate := range opencodeGoVisionModelCandidates(baseModel) {
+		if strings.HasPrefix(candidate, "qwen") {
+			return true
+		}
+	}
+	return false
 }
 
 var opencodeGoFallbackModelFieldPaths = []string{

@@ -351,6 +351,7 @@ type ClinePatch struct {
 	Headers        *map[string]string   `json:"headers"`
 	Models         *[]config.ClineModel `json:"models"`
 	ExcludedModels *[]string            `json:"excluded-models"`
+	VisionFallback *string              `json:"vision-fallback-model"`
 }
 
 func (s *Service) ClineKeys() []config.ClineKey {
@@ -441,6 +442,9 @@ func (s *Service) PatchClineKey(index *int, apiKey *string, name *string, patch 
 	}
 	if patch.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*patch.ExcludedModels)
+	}
+	if patch.VisionFallback != nil {
+		entry.VisionFallbackModel = strings.TrimSpace(*patch.VisionFallback)
 	}
 	NormalizeClineKey(&entry)
 	if entry.APIKey == "" {
@@ -578,6 +582,7 @@ func NormalizeClineKey(entry *config.ClineKey) {
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.Models = config.NormalizeClineModels(entry.Models)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 }
 
 func NormalizedClineKeyEntries(entries []config.ClineKey) []config.ClineKey {

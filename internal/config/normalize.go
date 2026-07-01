@@ -281,6 +281,7 @@ func (cfg *Config) SanitizeClineKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.Models = NormalizeClineModels(entry.Models)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 		out = append(out, entry)
 	}
 	cfg.ClineKey = out

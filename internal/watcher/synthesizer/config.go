@@ -384,11 +384,14 @@ func (s *ConfigSynthesizer) synthesizeClineKeys(ctx *SynthesisContext) []*coreau
 			"source":       fmt.Sprintf("config:cline[%s]", token),
 			"api_key":      key,
 			"base_url":     base,
-			"compat_name":  "Cline",
+			"compat_name":  "ClinePass",
 			"provider_key": "cline",
 		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
+			attrs["vision_fallback_model"] = visionFallbackModel
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		label := strings.TrimSpace(entry.Name)

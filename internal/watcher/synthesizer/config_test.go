@@ -385,15 +385,16 @@ func TestConfigSynthesizer_ClineKeys(t *testing.T) {
 		Config: &config.Config{
 			ClineKey: []config.ClineKey{
 				{
-					APIKey:         "cline-key",
-					Name:           "cline",
-					Priority:       7,
-					Prefix:         "team",
-					BaseURL:        "https://api.cline.bot/api/v1/",
-					ProxyURL:       "http://proxy",
-					ProxyID:        "hk",
-					Headers:        map[string]string{"X-Test": "yes"},
-					ExcludedModels: []string{"cline-pass/minimax-m3"},
+					APIKey:              "cline-key",
+					Name:                "cline",
+					Priority:            7,
+					Prefix:              "team",
+					BaseURL:             "https://api.cline.bot/api/v1/",
+					ProxyURL:            "http://proxy",
+					ProxyID:             "hk",
+					Headers:             map[string]string{"X-Test": "yes"},
+					ExcludedModels:      []string{"cline-pass/minimax-m3"},
+					VisionFallbackModel: "cline-pass/mimo-v2.5-pro",
 				},
 			},
 		},
@@ -412,7 +413,7 @@ func TestConfigSynthesizer_ClineKeys(t *testing.T) {
 	if auth.Provider != "cline" || auth.Label != "cline" || auth.Prefix != "team" {
 		t.Fatalf("unexpected auth identity: %+v", auth)
 	}
-	if auth.Attributes["api_key"] != "cline-key" || auth.Attributes["base_url"] != config.DefaultClineBaseURL || auth.Attributes["provider_key"] != "cline" || auth.Attributes["compat_name"] != "Cline" {
+	if auth.Attributes["api_key"] != "cline-key" || auth.Attributes["base_url"] != config.DefaultClineBaseURL || auth.Attributes["provider_key"] != "cline" || auth.Attributes["compat_name"] != "ClinePass" {
 		t.Fatalf("unexpected attrs: %#v", auth.Attributes)
 	}
 	if auth.Attributes["priority"] != "7" || auth.Attributes["header:X-Test"] != "yes" {
@@ -423,6 +424,9 @@ func TestConfigSynthesizer_ClineKeys(t *testing.T) {
 	}
 	if auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["excluded_models"] != "cline-pass/minimax-m3" {
 		t.Fatalf("expected api key exclusion metadata, got %#v", auth.Attributes)
+	}
+	if auth.Attributes["vision_fallback_model"] != "cline-pass/mimo-v2.5-pro" {
+		t.Fatalf("expected vision fallback metadata, got %#v", auth.Attributes)
 	}
 }
 
