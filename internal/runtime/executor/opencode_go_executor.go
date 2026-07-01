@@ -89,7 +89,12 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 	// Vision fallback: if the current message has new images and the
 	// model doesn't natively support vision, route to the configured
 	// vision model for direct image analysis.
+	originalRequestedModel := payloadRequestedModel(opts, req.Model)
+	originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
 	fallback := e.applyVisionFallback(auth, req, opts)
+	if fallback.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+	}
 	req = fallback.Request
 
 	// A3: If the current turn still has images and no vision fallback was applied,
@@ -164,7 +169,12 @@ func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 	// Vision fallback: if the current message has new images and the
 	// model doesn't natively support vision, route to the configured
 	// vision model for direct image analysis.
+	originalRequestedModel := payloadRequestedModel(opts, req.Model)
+	originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
 	fallback := e.applyVisionFallback(auth, req, opts)
+	if fallback.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+	}
 	req = fallback.Request
 
 	// A3: If the current turn still has images and no vision fallback was applied,

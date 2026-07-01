@@ -362,7 +362,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 			apiKeyName = row.Name
 		}
 	}
-	InsertLogWithDetailsIdentitySubjectUpstream(statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.UpstreamModel, record.Source, record.ChannelName,
+	InsertLogWithDetailsIdentitySubjectUpstreamVision(statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.UpstreamModel, record.VisionFallbackModel, record.Source, record.ChannelName,
 		record.AuthIndex, failed, timestamp, record.LatencyMs, record.FirstTokenMs, detail,
 		record.InputContent, record.OutputContent, record.DetailContent)
 }

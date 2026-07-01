@@ -107,6 +107,37 @@ type ExecutionContext struct {
 	recorder      UpstreamRecorder
 }
 
+type visionFallbackLogContextKey struct{}
+
+type visionFallbackLogInfo struct {
+	RequestedModel string
+	UpstreamModel  string
+	FallbackModel  string
+}
+
+func contextWithVisionFallbackLog(ctx context.Context, requestedModel, upstreamModel, fallbackModel string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	info := visionFallbackLogInfo{
+		RequestedModel: strings.TrimSpace(requestedModel),
+		UpstreamModel:  strings.TrimSpace(upstreamModel),
+		FallbackModel:  strings.TrimSpace(fallbackModel),
+	}
+	if info.FallbackModel == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, visionFallbackLogContextKey{}, info)
+}
+
+func visionFallbackLogFromContext(ctx context.Context) visionFallbackLogInfo {
+	if ctx == nil {
+		return visionFallbackLogInfo{}
+	}
+	info, _ := ctx.Value(visionFallbackLogContextKey{}).(visionFallbackLogInfo)
+	return info
+}
+
 func newExecutionContext(
 	ctx context.Context,
 	provider string,
@@ -148,7 +179,13 @@ func (ec *ExecutionContext) Reporter() *usageReporter {
 	if strings.TrimSpace(model) == "" {
 		model = ec.BaseModel
 	}
-	return newUsageReporter(ec.Context, ec.Provider, model, ec.BaseModel, ec.Auth)
+	reporter := newUsageReporter(ec.Context, ec.Provider, model, ec.BaseModel, ec.Auth)
+	if fallback := visionFallbackLogFromContext(ec.Context); fallback.FallbackModel != "" {
+		reporter.setModel(fallback.RequestedModel)
+		reporter.setUpstreamModel(fallback.UpstreamModel)
+		reporter.setVisionFallbackModel(fallback.FallbackModel)
+	}
+	return reporter
 }
 
 func (ec *ExecutionContext) HTTPClient(timeout time.Duration) *http.Client {

@@ -16,26 +16,27 @@ import (
 
 // LogRow represents a single request log entry returned by QueryLogs.
 type LogRow struct {
-	ID              int64     `json:"id"`
-	Timestamp       time.Time `json:"timestamp"`
-	APIKey          string    `json:"api_key"`
-	APIKeyName      string    `json:"api_key_name"`
-	Model           string    `json:"model"`
-	UpstreamModel   string    `json:"upstream_model,omitempty"`
-	Source          string    `json:"source"`
-	ChannelName     string    `json:"channel_name"`
-	AuthIndex       string    `json:"auth_index"`
-	Failed          bool      `json:"failed"`
-	Streaming       bool      `json:"streaming"`
-	LatencyMs       int64     `json:"latency_ms"`
-	FirstTokenMs    int64     `json:"first_token_ms"`
-	InputTokens     int64     `json:"input_tokens"`
-	OutputTokens    int64     `json:"output_tokens"`
-	ReasoningTokens int64     `json:"reasoning_tokens"`
-	CachedTokens    int64     `json:"cached_tokens"`
-	TotalTokens     int64     `json:"total_tokens"`
-	Cost            float64   `json:"cost"`
-	HasContent      bool      `json:"has_content"`
+	ID                  int64     `json:"id"`
+	Timestamp           time.Time `json:"timestamp"`
+	APIKey              string    `json:"api_key"`
+	APIKeyName          string    `json:"api_key_name"`
+	Model               string    `json:"model"`
+	UpstreamModel       string    `json:"upstream_model,omitempty"`
+	VisionFallbackModel string    `json:"vision_fallback_model,omitempty"`
+	Source              string    `json:"source"`
+	ChannelName         string    `json:"channel_name"`
+	AuthIndex           string    `json:"auth_index"`
+	Failed              bool      `json:"failed"`
+	Streaming           bool      `json:"streaming"`
+	LatencyMs           int64     `json:"latency_ms"`
+	FirstTokenMs        int64     `json:"first_token_ms"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	ReasoningTokens     int64     `json:"reasoning_tokens"`
+	CachedTokens        int64     `json:"cached_tokens"`
+	TotalTokens         int64     `json:"total_tokens"`
+	Cost                float64   `json:"cost"`
+	HasContent          bool      `json:"has_content"`
 }
 
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
@@ -127,6 +128,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   auth_subject_id  TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
   upstream_model   TEXT NOT NULL DEFAULT '',
+  vision_fallback_model TEXT NOT NULL DEFAULT '',
   source           TEXT NOT NULL DEFAULT '',
   channel_name     TEXT NOT NULL DEFAULT '',
   auth_index       TEXT NOT NULL DEFAULT '',
@@ -247,6 +249,15 @@ func migrateUpstreamModelColumn(db *sql.DB) {
 	if err != nil {
 		if !strings.Contains(err.Error(), "duplicate") {
 			log.Warnf("usage: migrate column upstream_model: %v", err)
+		}
+	}
+}
+
+func migrateVisionFallbackModelColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN vision_fallback_model TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column vision_fallback_model: %v", err)
 		}
 	}
 }
@@ -439,6 +450,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateApiKeyNameColumn(db)
 	log.Debugf("usage: running upstream_model column migration")
 	migrateUpstreamModelColumn(db)
+	log.Debugf("usage: running vision_fallback_model column migration")
+	migrateVisionFallbackModelColumn(db)
 	log.Debugf("usage: running api_key_id column migration")
 	migrateAPIKeyIDColumn(db)
 	log.Debugf("usage: running auth_subject_id column migration")
@@ -499,34 +512,40 @@ func CloseDB() {
 func InsertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
 }
 
 func InsertLogWithDetails(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentity(apiKey, apiKeyID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentitySubject(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentitySubjectUpstream(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
-func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex string,
+func InsertLogWithDetailsIdentitySubjectUpstreamVision(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
 	db := getDB()
@@ -550,6 +569,7 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstr
 	authSubjectID = strings.TrimSpace(authSubjectID)
 	apiKeyName = strings.TrimSpace(apiKeyName)
 	upstreamModel = strings.TrimSpace(upstreamModel)
+	visionFallbackModel = strings.TrimSpace(visionFallbackModel)
 	if identity := ResolveAPIKeyIdentity(apiKey); identity != nil {
 		if apiKeyID == "" {
 			apiKeyID = identity.ID
@@ -569,11 +589,11 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstr
 
 	result, err := tx.Exec(
 		`INSERT INTO request_logs
-			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, source, channel_name, auth_index,
+			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
 			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex,
+		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex,
 		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,

@@ -18,20 +18,21 @@ import (
 const usageReporterOutputMemoryLimit = 256 * 1024
 
 type usageReporter struct {
-	provider      string
-	model         string
-	upstreamModel string
-	authID        string
-	authIndex     string
-	authSubjectID string
-	apiKey        string
-	apiKeyID      string
-	apiKeyName    string
-	source        string
-	channelName   string
-	requestedAt   time.Time
-	once          sync.Once
-	contentMu     sync.Mutex
+	provider            string
+	model               string
+	upstreamModel       string
+	visionFallbackModel string
+	authID              string
+	authIndex           string
+	authSubjectID       string
+	apiKey              string
+	apiKeyID            string
+	apiKeyName          string
+	source              string
+	channelName         string
+	requestedAt         time.Time
+	once                sync.Once
+	contentMu           sync.Mutex
 
 	// Content captured for log detail viewer
 	inputContent  string
@@ -87,6 +88,24 @@ func (r *usageReporter) setModel(model string) {
 	}
 	if model = strings.TrimSpace(model); model != "" {
 		r.model = model
+	}
+}
+
+func (r *usageReporter) setUpstreamModel(model string) {
+	if r == nil {
+		return
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		r.upstreamModel = model
+	}
+}
+
+func (r *usageReporter) setVisionFallbackModel(model string) {
+	if r == nil {
+		return
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		r.visionFallbackModel = model
 	}
 }
 
@@ -238,25 +257,26 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail coreusage
 		}
 		firstTokenMs := firstTokenLatencyMsFromContext(ctx, r.requestedAt)
 		coreusage.PublishRecord(ctx, coreusage.Record{
-			Provider:      r.provider,
-			Model:         r.model,
-			UpstreamModel: r.upstreamModel,
-			Source:        r.source,
-			ChannelName:   r.channelName,
-			APIKey:        r.apiKey,
-			APIKeyID:      r.apiKeyID,
-			APIKeyName:    r.apiKeyName,
-			AuthID:        r.authID,
-			AuthIndex:     r.authIndex,
-			AuthSubjectID: r.authSubjectID,
-			RequestedAt:   r.requestedAt,
-			LatencyMs:     latencyMs,
-			FirstTokenMs:  firstTokenMs,
-			Failed:        failed,
-			Detail:        detail,
-			InputContent:  inputContent,
-			OutputContent: outputContent,
-			DetailContent: buildRequestDetailContent(ctx),
+			Provider:            r.provider,
+			Model:               r.model,
+			UpstreamModel:       r.upstreamModel,
+			VisionFallbackModel: r.visionFallbackModel,
+			Source:              r.source,
+			ChannelName:         r.channelName,
+			APIKey:              r.apiKey,
+			APIKeyID:            r.apiKeyID,
+			APIKeyName:          r.apiKeyName,
+			AuthID:              r.authID,
+			AuthIndex:           r.authIndex,
+			AuthSubjectID:       r.authSubjectID,
+			RequestedAt:         r.requestedAt,
+			LatencyMs:           latencyMs,
+			FirstTokenMs:        firstTokenMs,
+			Failed:              failed,
+			Detail:              detail,
+			InputContent:        inputContent,
+			OutputContent:       outputContent,
+			DetailContent:       buildRequestDetailContent(ctx),
 		})
 	})
 }
@@ -277,24 +297,26 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		}
 		firstTokenMs := firstTokenLatencyMsFromContext(ctx, r.requestedAt)
 		coreusage.PublishRecord(ctx, coreusage.Record{
-			Provider:      r.provider,
-			Model:         r.model,
-			Source:        r.source,
-			ChannelName:   r.channelName,
-			APIKey:        r.apiKey,
-			APIKeyID:      r.apiKeyID,
-			APIKeyName:    r.apiKeyName,
-			AuthID:        r.authID,
-			AuthIndex:     r.authIndex,
-			AuthSubjectID: r.authSubjectID,
-			RequestedAt:   r.requestedAt,
-			LatencyMs:     latencyMs,
-			FirstTokenMs:  firstTokenMs,
-			Failed:        false,
-			Detail:        coreusage.Detail{},
-			InputContent:  inputContent,
-			OutputContent: outputContent,
-			DetailContent: buildRequestDetailContent(ctx),
+			Provider:            r.provider,
+			Model:               r.model,
+			UpstreamModel:       r.upstreamModel,
+			VisionFallbackModel: r.visionFallbackModel,
+			Source:              r.source,
+			ChannelName:         r.channelName,
+			APIKey:              r.apiKey,
+			APIKeyID:            r.apiKeyID,
+			APIKeyName:          r.apiKeyName,
+			AuthID:              r.authID,
+			AuthIndex:           r.authIndex,
+			AuthSubjectID:       r.authSubjectID,
+			RequestedAt:         r.requestedAt,
+			LatencyMs:           latencyMs,
+			FirstTokenMs:        firstTokenMs,
+			Failed:              false,
+			Detail:              coreusage.Detail{},
+			InputContent:        inputContent,
+			OutputContent:       outputContent,
+			DetailContent:       buildRequestDetailContent(ctx),
 		})
 	})
 }

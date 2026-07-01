@@ -71,7 +71,12 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	fallback := opencodeGoVisionFallbackResult{Request: req}
 	if e.provider == "cline" {
+		originalRequestedModel := payloadRequestedModel(opts, req.Model)
+		originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
 		fallback = applyVisionFallback(req, opts, clineVisionFallbackModel(e.cfg, auth))
+		if fallback.Applied {
+			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+		}
 		req = fallback.Request
 	}
 
@@ -200,7 +205,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	fallback := opencodeGoVisionFallbackResult{Request: req}
 	if e.provider == "cline" {
+		originalRequestedModel := payloadRequestedModel(opts, req.Model)
+		originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
 		fallback = applyVisionFallback(req, opts, clineVisionFallbackModel(e.cfg, auth))
+		if fallback.Applied {
+			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+		}
 		req = fallback.Request
 	}
 

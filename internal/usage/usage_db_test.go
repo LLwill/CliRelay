@@ -482,6 +482,50 @@ func TestQueryLogsSupportsExplicitEmptyMultiSelectFilters(t *testing.T) {
 	}
 }
 
+func TestQueryLogsReturnsVisionFallbackModelSeparately(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentitySubjectUpstreamVision(
+		"sk-live-123",
+		"key-1",
+		"subject-1",
+		"Primary",
+		"alias-model",
+		"real-model",
+		"vision-model",
+		"codex",
+		"Codex",
+		"auth-1",
+		false,
+		now,
+		140,
+		14,
+		TokenStats{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		"",
+		"",
+		"",
+	)
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(result.Items))
+	}
+	row := result.Items[0]
+	if row.Model != "alias-model" {
+		t.Fatalf("Model = %q, want alias-model", row.Model)
+	}
+	if row.UpstreamModel != "real-model" {
+		t.Fatalf("UpstreamModel = %q, want real-model", row.UpstreamModel)
+	}
+	if row.VisionFallbackModel != "vision-model" {
+		t.Fatalf("VisionFallbackModel = %q, want vision-model", row.VisionFallbackModel)
+	}
+}
+
 func TestQueryLogContentKeepsMissingFailedOutputEmpty(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{
 		StoreContent:           true,
@@ -612,7 +656,7 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
 			t.Fatalf("scan table info: %v", err)
 		}
-		if name == "first_token_ms" || name == "streaming" {
+		if name == "first_token_ms" || name == "streaming" || name == "vision_fallback_model" {
 			found[name] = true
 		}
 	}
@@ -621,6 +665,9 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 	}
 	if !found["streaming"] {
 		t.Fatalf("expected streaming column to exist after InitDB migration")
+	}
+	if !found["vision_fallback_model"] {
+		t.Fatalf("expected vision_fallback_model column to exist after InitDB migration")
 	}
 }
 
