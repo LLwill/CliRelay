@@ -75,7 +75,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM alpine:3.22.0
 
-RUN apk add --no-cache tzdata ca-certificates docker-cli docker-cli-compose
+RUN apk add --no-cache tzdata ca-certificates docker-cli docker-cli-compose su-exec
 
 RUN addgroup -S -g 10001 clirelay \
   && adduser -S -D -H -u 10001 -h /CLIProxyAPI -s /sbin/nologin -G clirelay clirelay \
@@ -87,6 +87,7 @@ COPY --from=backend-builder --chown=clirelay:clirelay /app/clirelay-updater /CLI
 COPY --from=frontend-builder --chown=clirelay:clirelay /frontend/dist/ /CLIProxyAPI/panel/
 
 COPY --chown=clirelay:clirelay config.example.yaml /CLIProxyAPI/config.example.yaml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 WORKDIR /CLIProxyAPI
 
@@ -97,9 +98,13 @@ ENV TZ=Asia/Shanghai \
     AUTH_PATH=/CLIProxyAPI/auths \
     CLIRELAY_LOCALE=zh
 
-RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+  && cp /usr/share/zoneinfo/${TZ} /etc/localtime \
+  && echo "${TZ}" > /etc/timezone
 
-USER clirelay
+USER root
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -q -T 2 -O /dev/null http://127.0.0.1:8317/healthz

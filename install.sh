@@ -895,6 +895,9 @@ main() {
 
     step 3 "$(is_zh && echo "准备配置与部署元数据" || echo "Preparing configuration and deployment metadata")"
     mkdir -p "${INSTALL_DIR}" "${INSTALL_DIR}/auths" "${INSTALL_DIR}/logs" "${INSTALL_DIR}/data"
+    if [[ "${OS_NAME}" != "Darwin" ]]; then
+        chown -R 10001:10001 "${INSTALL_DIR}/auths" "${INSTALL_DIR}/logs" "${INSTALL_DIR}/data" || warn "Could not chown data directories; the container entrypoint will retry at startup."
+    fi
     if [[ "$is_update" == "true" ]]; then
         if is_zh; then
             success "保留现有配置: ${INSTALL_DIR}/config.yaml"
@@ -909,6 +912,9 @@ main() {
         else
             success "Configuration file written"
         fi
+    fi
+    if [[ "${OS_NAME}" != "Darwin" ]] && [[ -f "${INSTALL_DIR}/config.yaml" ]]; then
+        chown 10001:10001 "${INSTALL_DIR}/config.yaml" || warn "Could not chown config.yaml; management config writes may require the container entrypoint to repair it."
     fi
     write_env
     write_compose
