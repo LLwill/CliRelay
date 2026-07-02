@@ -1,6 +1,10 @@
 package usage
 
-import "testing"
+import (
+	"math"
+	"testing"
+	"time"
+)
 
 func TestCalculateCostDiscountsCachedInputSubset(t *testing.T) {
 	initModelConfigTestDB(t)
@@ -253,5 +257,41 @@ func TestCalculateCostV2FallbackLegacyWithModelPricingTable(t *testing.T) {
 	want := CalculateCost("legacy-table-model", 1000, 500, 800)
 	if cost != want {
 		t.Fatalf("cost = %.10f, want %.10f (legacy CalculateCost = %.10f)", cost, want, want)
+	}
+}
+
+func TestQueryTodayCostByKeyResetsDaily(t *testing.T) {
+	initModelConfigTestDB(t)
+	db := getDB()
+	if db == nil {
+		t.Fatal("expected test db")
+	}
+
+	today := CutoffStartUTC(1)
+	yesterday := today.Add(-time.Second)
+	for _, row := range []struct {
+		ts   time.Time
+		cost float64
+	}{
+		{ts: today.Add(time.Hour), cost: 1.25},
+		{ts: today.Add(2 * time.Hour), cost: 2.75},
+		{ts: yesterday, cost: 100},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO request_logs
+			 (timestamp, api_key, model, source, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+			 VALUES (?, ?, ?, ?, 0, 1, 0, 0, 0, 0, 0, ?)`,
+			row.ts.Format(time.RFC3339), "sk-daily-spending", "model", "test", row.cost,
+		); err != nil {
+			t.Fatalf("insert request log: %v", err)
+		}
+	}
+
+	got, err := QueryTodayCostByKey("sk-daily-spending")
+	if err != nil {
+		t.Fatalf("QueryTodayCostByKey() error = %v", err)
+	}
+	if math.Abs(got-4) > 1e-12 {
+		t.Fatalf("today cost = %v, want 4", got)
 	}
 }

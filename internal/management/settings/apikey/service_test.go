@@ -108,6 +108,28 @@ func TestPatchEntryRenamePreservesStableID(t *testing.T) {
 	}
 }
 
+func TestPatchEntryUpdatesDailySpendingLimit(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(nil)
+
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{ID: "key-1", Key: "sk-cost", DailySpendingLimit: 1}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-cost): %v", err)
+	}
+
+	limit := 4.5
+	if err := svc.PatchEntry(&[]string{"key-1"}[0], nil, nil, EntryPatch{DailySpendingLimit: &limit}); err != nil {
+		t.Fatalf("PatchEntry() error = %v", err)
+	}
+
+	got := usage.GetAPIKey("sk-cost")
+	if got == nil {
+		t.Fatal("expected patched key")
+	}
+	if got.DailySpendingLimit != limit {
+		t.Fatalf("DailySpendingLimit = %v, want %v", got.DailySpendingLimit, limit)
+	}
+}
+
 func TestReplacePermissionProfilesValidatesAndSanitizes(t *testing.T) {
 	setupTestDB(t)
 	svc := NewService(func(channels []string) ([]string, error) {

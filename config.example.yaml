@@ -218,6 +218,7 @@ routing:
 # api-key-entries:
 #   - key: "sk-user-pro"
 #     name: "Pro User"
+#     daily-spending-limit: 2.0
 #     allowed-channel-groups: ["pro"]
 #   - key: "sk-team-a"
 #     name: "Team A"

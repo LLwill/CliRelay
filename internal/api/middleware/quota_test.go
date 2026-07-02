@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -70,6 +71,53 @@ func TestQuotaMiddlewareEnforcesConcurrencyLimitPerKey(t *testing.T) {
 	}
 }
 
+func TestQuotaMiddlewareDailySpendingLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetQuotaMiddlewareState(t)
+
+	queryTodayCostByKeyFunc = func(key string) (float64, error) {
+		if key == "key-over" {
+			return 50, nil
+		}
+		return 20, nil
+	}
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("apiKey", c.GetHeader("X-Test-Key"))
+		c.Set("accessMetadata", map[string]string{"daily-spending-limit": "50"})
+		c.Next()
+	})
+	router.Use(QuotaMiddleware())
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	allowed := httptest.NewRecorder()
+	router.ServeHTTP(allowed, newQuotaPostRequest("key-under"))
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("under-limit status = %d, want %d", allowed.Code, http.StatusNoContent)
+	}
+
+	blocked := httptest.NewRecorder()
+	router.ServeHTTP(blocked, newQuotaPostRequest("key-over"))
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit status = %d, want %d", blocked.Code, http.StatusTooManyRequests)
+	}
+
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(blocked.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "daily_spending_limit_exceeded" {
+		t.Fatalf("error code = %q, want daily_spending_limit_exceeded", body.Error.Code)
+	}
+}
+
 func newQuotaPostRequest(key string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("X-Test-Key", key)
@@ -85,4 +133,14 @@ func resetQuotaMiddlewareState(t *testing.T) {
 	inFlightMu.Lock()
 	inFlightByKey = map[string]int{}
 	inFlightMu.Unlock()
+	countTodayByKeyFunc = func(string) (int64, error) { return 0, nil }
+	countTotalByKeyFunc = func(string) (int64, error) { return 0, nil }
+	queryTotalCostByKeyFunc = func(string) (float64, error) { return 0, nil }
+	queryTodayCostByKeyFunc = func(string) (float64, error) { return 0, nil }
+	t.Cleanup(func() {
+		countTodayByKeyFunc = func(string) (int64, error) { return 0, nil }
+		countTotalByKeyFunc = func(string) (int64, error) { return 0, nil }
+		queryTotalCostByKeyFunc = func(string) (float64, error) { return 0, nil }
+		queryTodayCostByKeyFunc = func(string) (float64, error) { return 0, nil }
+	})
 }

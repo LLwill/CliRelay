@@ -123,6 +123,10 @@ type APIKeyEntry struct {
 	// total accumulated cost exceeds this limit.
 	SpendingLimit float64 `yaml:"spending-limit,omitempty" json:"spending-limit,omitempty"`
 
+	// DailySpendingLimit is the maximum allowed spending in US dollars per day. 0 means
+	// unlimited. It resets at the project timezone day boundary.
+	DailySpendingLimit float64 `yaml:"daily-spending-limit,omitempty" json:"daily-spending-limit,omitempty"`
+
 	// ConcurrencyLimit is the maximum number of concurrent requests. 0 means unlimited.
 	ConcurrencyLimit int `yaml:"concurrency-limit,omitempty" json:"concurrency-limit,omitempty"`
 

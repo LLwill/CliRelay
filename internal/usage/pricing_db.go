@@ -346,3 +346,22 @@ func QueryTotalCostByKey(apiKey string) (float64, error) {
 	}
 	return total, nil
 }
+
+// QueryTodayCostByKey returns the project-day accumulated cost for an API key.
+func QueryTodayCostByKey(apiKey string) (float64, error) {
+	db := getDB()
+	if db == nil {
+		return 0, nil
+	}
+	clause, args := buildSingleAPIKeySelectorClause(apiKey)
+	args = append(args, CutoffStartUTC(1).Format(time.RFC3339))
+	var total float64
+	err := db.QueryRow(
+		"SELECT COALESCE(SUM(cost), 0) FROM request_logs"+clause+" AND timestamp >= ?",
+		args...,
+	).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("usage: query today cost: %w", err)
+	}
+	return total, nil
+}

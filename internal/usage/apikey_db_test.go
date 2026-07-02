@@ -58,6 +58,7 @@ func TestAPIKeyUpsertAndGet(t *testing.T) {
 		Name:                "Test Key",
 		PermissionProfileID: "standard",
 		DailyLimit:          100,
+		DailySpendingLimit:  12.5,
 		SystemPrompt:        "You are a helpful assistant.\n### Special chars: # * ** ☢️",
 	}
 
@@ -75,6 +76,9 @@ func TestAPIKeyUpsertAndGet(t *testing.T) {
 	if got.DailyLimit != 100 {
 		t.Errorf("daily_limit = %d, want 100", got.DailyLimit)
 	}
+	if got.DailySpendingLimit != 12.5 {
+		t.Errorf("daily_spending_limit = %v, want 12.5", got.DailySpendingLimit)
+	}
 	if got.PermissionProfileID != "standard" {
 		t.Errorf("permission_profile_id = %q, want %q", got.PermissionProfileID, "standard")
 	}
@@ -86,6 +90,7 @@ func TestAPIKeyUpsertAndGet(t *testing.T) {
 	entry.Name = "Updated Key"
 	entry.PermissionProfileID = "strict"
 	entry.DailyLimit = 200
+	entry.DailySpendingLimit = 7.25
 	if err := UpsertAPIKey(entry); err != nil {
 		t.Fatalf("UpsertAPIKey (update): %v", err)
 	}
@@ -99,6 +104,9 @@ func TestAPIKeyUpsertAndGet(t *testing.T) {
 	}
 	if got.DailyLimit != 200 {
 		t.Errorf("daily_limit after update = %d, want 200", got.DailyLimit)
+	}
+	if got.DailySpendingLimit != 7.25 {
+		t.Errorf("daily_spending_limit after update = %v, want 7.25", got.DailySpendingLimit)
 	}
 	if got.PermissionProfileID != "strict" {
 		t.Errorf("permission_profile_id after update = %q, want %q", got.PermissionProfileID, "strict")
@@ -314,10 +322,11 @@ func TestAPIKeySystemPromptSpecialChars(t *testing.T) {
 
 func TestAPIKeyToConfigEntry(t *testing.T) {
 	row := APIKeyRow{
-		Key:           "sk-convert",
-		Name:          "Converted",
-		DailyLimit:    50,
-		AllowedModels: []string{"model-a"},
+		Key:                "sk-convert",
+		Name:               "Converted",
+		DailyLimit:         50,
+		DailySpendingLimit: 3.5,
+		AllowedModels:      []string{"model-a"},
 		AllowedChannels: []string{
 			"Claude Team",
 		},
@@ -328,6 +337,9 @@ func TestAPIKeyToConfigEntry(t *testing.T) {
 	entry := row.ToConfigEntry()
 	if entry.Key != row.Key || entry.Name != row.Name || entry.DailyLimit != row.DailyLimit {
 		t.Errorf("ToConfigEntry mismatch: %+v", entry)
+	}
+	if entry.DailySpendingLimit != row.DailySpendingLimit {
+		t.Errorf("DailySpendingLimit mismatch: %v vs %v", entry.DailySpendingLimit, row.DailySpendingLimit)
 	}
 	if entry.SystemPrompt != row.SystemPrompt {
 		t.Errorf("SystemPrompt mismatch: %q vs %q", entry.SystemPrompt, row.SystemPrompt)
