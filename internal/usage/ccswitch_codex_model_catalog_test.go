@@ -46,6 +46,22 @@ func TestBuildCcSwitchCodexModelCatalogUsesRequestModels(t *testing.T) {
 	if !deepseek.SupportedInAPI || deepseek.Visibility != "list" {
 		t.Fatalf("catalog entry missing visible API flags: %#v", deepseek)
 	}
+	if deepseek.DefaultReasoningLevel != "medium" {
+		t.Fatalf("default_reasoning_level = %q, want medium", deepseek.DefaultReasoningLevel)
+	}
+	gotEfforts := make([]string, 0, len(deepseek.SupportedReasoningLevels))
+	for _, level := range deepseek.SupportedReasoningLevels {
+		gotEfforts = append(gotEfforts, level.Effort)
+	}
+	wantEfforts := []string{"low", "medium", "high", "xhigh"}
+	if len(gotEfforts) != len(wantEfforts) {
+		t.Fatalf("supported_reasoning_levels len = %d, want %d: %#v", len(gotEfforts), len(wantEfforts), gotEfforts)
+	}
+	for idx := range wantEfforts {
+		if gotEfforts[idx] != wantEfforts[idx] {
+			t.Fatalf("supported_reasoning_levels[%d] = %q, want %q; all=%#v", idx, gotEfforts[idx], wantEfforts[idx], gotEfforts)
+		}
+	}
 	if deepseek.BaseInstructions == "" || deepseek.ModelMessages.InstructionsTemplate == "" {
 		t.Fatalf("catalog entry missing Codex instruction templates: %#v", deepseek)
 	}
