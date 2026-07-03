@@ -263,27 +263,17 @@ func collectCodexImagesFromResponsesBody(body []byte) ([]codexResponsesImageResu
 }
 
 func codexResponsesFailedStatusErr(payload []byte) statusErr {
-	message := strings.TrimSpace(gjson.GetBytes(payload, "response.error.message").String())
-	if message == "" {
-		message = strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
-	}
-	code := strings.TrimSpace(gjson.GetBytes(payload, "response.error.code").String())
-	if code == "" {
-		code = strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
-	}
-	errType := strings.TrimSpace(gjson.GetBytes(payload, "response.error.type").String())
-	if errType == "" {
-		errType = strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
-	}
-	statusCode := http.StatusBadGateway
-	if strings.Contains(code, "rate_limit") || strings.Contains(errType, "rate_limit") {
-		statusCode = http.StatusTooManyRequests
+	message := codexResponsesFailedField(payload, "response.error.message", "error.message", "message")
+	code := codexResponsesFailedField(payload, "response.error.code", "error.code", "code")
+	errType := codexResponsesFailedField(payload, "response.error.type", "error.type", "type")
+	statusCode := codexResponsesFailedHTTPStatus(code, errType)
+	if statusCode == http.StatusTooManyRequests && errType == "" {
 		errType = "rate_limit_error"
 	}
 	if message == "" {
-		message = "responses image request failed"
+		message = "responses request failed"
 	}
-	if errType == "" {
+	if errType == "" || errType == "response.failed" || errType == "error" {
 		errType = "upstream_error"
 	}
 	body, _ := json.Marshal(map[string]any{
@@ -298,6 +288,33 @@ func codexResponsesFailedStatusErr(payload []byte) statusErr {
 		err.retryAfter = &retryAfter
 	}
 	return err
+}
+
+func codexResponsesFailedField(payload []byte, paths ...string) string {
+	for _, path := range paths {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexResponsesFailedHTTPStatus(code string, errType string) int {
+	lower := strings.ToLower(code + " " + errType)
+	switch {
+	case strings.Contains(lower, "rate_limit") || strings.Contains(lower, "quota"):
+		return http.StatusTooManyRequests
+	case strings.Contains(lower, "invalid_request"):
+		return http.StatusBadRequest
+	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "authentication"):
+		return http.StatusUnauthorized
+	case strings.Contains(lower, "forbidden") || strings.Contains(lower, "permission"):
+		return http.StatusForbidden
+	case strings.Contains(lower, "timeout"):
+		return http.StatusRequestTimeout
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func codexImageResponsesRetryDelay(err error, attempt int) (time.Duration, bool) {

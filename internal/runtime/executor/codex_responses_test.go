@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -21,6 +22,31 @@ func TestSanitizeCodexResponsesRequestStripsUnsupportedTokenLimitFields(t *testi
 	}
 	if !gjson.GetBytes(got, "stream").Bool() {
 		t.Fatalf("stream should be preserved; payload=%s", got)
+	}
+}
+
+func TestCodexResponsesFailedStatusErrExtractsTopLevelError(t *testing.T) {
+	err := codexResponsesFailedStatusErr([]byte(`{"type":"error","code":"internal_server_error","message":"upstream exploded"}`))
+
+	if err.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("StatusCode() = %d, want %d", err.StatusCode(), http.StatusBadGateway)
+	}
+	if !strings.Contains(err.Error(), "upstream exploded") {
+		t.Fatalf("Error() = %q, want upstream message", err.Error())
+	}
+	if strings.Contains(err.Error(), "responses request failed") {
+		t.Fatalf("Error() = %q, should not use fallback message", err.Error())
+	}
+}
+
+func TestCodexResponsesFailedStatusErrMapsRateLimit(t *testing.T) {
+	err := codexResponsesFailedStatusErr([]byte(`{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}}`))
+
+	if err.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want %d", err.StatusCode(), http.StatusTooManyRequests)
+	}
+	if !strings.Contains(err.Error(), "Rate limit reached") {
+		t.Fatalf("Error() = %q, want upstream message", err.Error())
 	}
 }
 

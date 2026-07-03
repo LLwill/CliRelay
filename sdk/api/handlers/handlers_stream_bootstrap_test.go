@@ -920,10 +920,20 @@ func TestExecuteStreamWithAuthManager_RejectsOpenAIResponsesStreamWithoutComplet
 	if !ok {
 		t.Fatalf("expected auth to be present")
 	}
-	if !updated.Unavailable {
-		t.Fatalf("expected incomplete stream to mark auth unavailable")
+	if updated.Unavailable {
+		t.Fatalf("incomplete responses stream must not mark auth unavailable")
 	}
-	if updated.LastError == nil || !strings.Contains(updated.LastError.Message, "upstream responses stream closed before response.completed") {
+	if updated.LastError == nil || updated.LastError.Code != "response_stream_incomplete" || !strings.Contains(updated.LastError.Message, "upstream responses stream closed before response.completed") {
 		t.Fatalf("expected protocol failure LastError, got %+v", updated.LastError)
+	}
+	state := updated.ModelStates["test-model"]
+	if state == nil {
+		t.Fatalf("expected model state for incomplete stream")
+	}
+	if state.LastError == nil || state.LastError.Code != "response_stream_incomplete" {
+		t.Fatalf("expected model protocol failure LastError, got %+v", state.LastError)
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("incomplete responses stream must not set model retry cooldown, got %v", state.NextRetryAfter)
 	}
 }

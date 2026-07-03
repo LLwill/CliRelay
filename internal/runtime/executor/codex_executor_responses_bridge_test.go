@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -113,9 +114,16 @@ func TestCodexExecutorExecuteStreamPreservesResponsesImageBridgeModel(t *testing
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
 
-	for range stream.Chunks {
+	var streamBody string
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamBody += string(chunk.Payload) + "\n"
 	}
-
+	if !strings.Contains(streamBody, `data: {"type":"response.completed"`) {
+		t.Fatalf("stream body = %q, want response.completed data event", streamBody)
+	}
 	if got := gjson.Get(lastBody, "model").String(); got != "gpt-5.4-mini" {
 		t.Fatalf("top-level model = %q, want %q; body=%s", got, "gpt-5.4-mini", lastBody)
 	}
@@ -124,6 +132,211 @@ func TestCodexExecutorExecuteStreamPreservesResponsesImageBridgeModel(t *testing
 	}
 	if got := gjson.Get(lastBody, "tools.0.model").String(); got != "gpt-image-2" {
 		t.Fatalf("tools.0.model = %q, want %q; body=%s", got, "gpt-image-2", lastBody)
+	}
+}
+
+func TestCodexExecutorExecuteStreamReturnsResponsesFailedError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"created_at\":1710000002,\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-stream-response-failed",
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"account_id":   "account-1",
+		},
+	}
+
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hi","stream":true}`),
+		Format:  sdktranslator.FromString("openai-response"),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var streamBody string
+	var chunkErr error
+	for chunk := range stream.Chunks {
+		streamBody += string(chunk.Payload)
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+		}
+	}
+	if !strings.Contains(streamBody, "response.failed") {
+		t.Fatalf("stream body = %q, want response.failed forwarded", streamBody)
+	}
+	if chunkErr == nil {
+		t.Fatal("stream error = nil, want response.failed error")
+	}
+	if strings.Contains(chunkErr.Error(), "response.completed") {
+		t.Fatalf("stream error = %v, should not report incomplete stream", chunkErr)
+	}
+	if !strings.Contains(chunkErr.Error(), "Rate limit reached") {
+		t.Fatalf("stream error = %v, want upstream message", chunkErr)
+	}
+	statusErr, ok := chunkErr.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %v/%v, want %d", statusErr, ok, http.StatusTooManyRequests)
+	}
+}
+
+func TestCodexExecutorExecuteStreamReturnsIncompleteResponsesError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-stream-incomplete",
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"account_id":   "account-1",
+		},
+	}
+
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hi","stream":true}`),
+		Format:  sdktranslator.FromString("openai-response"),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var chunkErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+		}
+	}
+	if chunkErr == nil {
+		t.Fatal("stream error = nil, want incomplete stream error")
+	}
+	authErr, ok := chunkErr.(*cliproxyauth.Error)
+	if !ok {
+		t.Fatalf("stream error type = %T, want *cliproxyauth.Error", chunkErr)
+	}
+	if authErr.Code != "response_stream_incomplete" {
+		t.Fatalf("stream error code = %q, want response_stream_incomplete", authErr.Code)
+	}
+	if authErr.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("StatusCode() = %d, want %d", authErr.StatusCode(), http.StatusBadGateway)
+	}
+}
+
+func TestCodexExecutorExecuteReturnsResponsesFailedError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"created_at\":1710000002,\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-response-failed",
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"account_id":   "account-1",
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hi"}`),
+		Format:  sdktranslator.FromString("openai-response"),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want response.failed error")
+	}
+	if strings.Contains(err.Error(), "response.completed") {
+		t.Fatalf("Execute() error = %v, should not report incomplete stream", err)
+	}
+	if !strings.Contains(err.Error(), "Rate limit reached") {
+		t.Fatalf("Execute() error = %v, want upstream message", err)
+	}
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %v/%v, want %d", statusErr, ok, http.StatusTooManyRequests)
+	}
+}
+
+func TestCodexExecutorExecuteReturnsTopLevelResponsesError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"error\",\"code\":\"internal_server_error\",\"message\":\"upstream exploded\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-top-level-error",
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"account_id":   "account-1",
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hi"}`),
+		Format:  sdktranslator.FromString("openai-response"),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want top-level error")
+	}
+	if strings.Contains(err.Error(), "response.completed") {
+		t.Fatalf("Execute() error = %v, should not report incomplete stream", err)
+	}
+	if !strings.Contains(err.Error(), "upstream exploded") {
+		t.Fatalf("Execute() error = %v, want upstream message", err)
 	}
 }
 

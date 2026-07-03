@@ -58,6 +58,37 @@ func TestErrorFromExecution_ExtractsStatusAndQuotaWindow(t *testing.T) {
 	}
 }
 
+func TestErrorFromExecution_PreservesAuthErrorCode(t *testing.T) {
+	t.Parallel()
+
+	err := &Error{
+		Code:       "response_stream_incomplete",
+		Message:    "upstream responses stream closed before response.completed",
+		HTTPStatus: http.StatusBadGateway,
+		Retryable:  true,
+	}
+
+	got := errorFromExecution(err)
+	if got == nil {
+		t.Fatal("errorFromExecution() = nil")
+	}
+	if got == err {
+		t.Fatal("errorFromExecution() returned source error pointer, want clone")
+	}
+	if got.Code != err.Code {
+		t.Fatalf("Code = %q, want %q", got.Code, err.Code)
+	}
+	if got.Message != err.Message {
+		t.Fatalf("Message = %q, want %q", got.Message, err.Message)
+	}
+	if got.HTTPStatus != err.HTTPStatus {
+		t.Fatalf("HTTPStatus = %d, want %d", got.HTTPStatus, err.HTTPStatus)
+	}
+	if !got.Retryable {
+		t.Fatal("Retryable = false, want true")
+	}
+}
+
 func TestHeadersFromError_ClonesHeaders(t *testing.T) {
 	t.Parallel()
 

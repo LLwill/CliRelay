@@ -50,7 +50,7 @@ func TestPublicCcSwitchImportConfigsFiltersByAPIKeyPermissions(t *testing.T) {
 		t.Fatalf("ReplaceAllCcSwitchImportConfigs: %v", err)
 	}
 
-	const apiKey = "sk-nyw1boql0aetf5o7dl2srrf9ciftgd95"
+	const apiKey = "sk-nyw1boql0aetf5o7dl2srrf9ciftgd95XXXX"
 	if err := usage.ReplaceAllAPIKeys([]usage.APIKeyRow{
 		{
 			Key:                  apiKey,

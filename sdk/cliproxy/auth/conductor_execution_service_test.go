@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 type executionMetadataExecutor struct {
@@ -50,6 +52,10 @@ func (e *executionMetadataExecutor) HttpRequest(context.Context, *Auth, *http.Re
 
 type streamChunkFailureExecutor struct{}
 
+type responsesFailedStreamExecutor struct{}
+
+type responsesIncompleteStreamExecutor struct{}
+
 func (e *streamChunkFailureExecutor) Identifier() string { return "codex" }
 
 func (e *streamChunkFailureExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -78,6 +84,56 @@ func (e *streamChunkFailureExecutor) CountTokens(context.Context, *Auth, cliprox
 }
 
 func (e *streamChunkFailureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
+func (e *responsesFailedStreamExecutor) Identifier() string { return "codex" }
+
+func (e *responsesFailedStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *responsesFailedStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"}}}")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *responsesFailedStreamExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *responsesFailedStreamExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *responsesFailedStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
+func (e *responsesIncompleteStreamExecutor) Identifier() string { return "codex" }
+
+func (e *responsesIncompleteStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *responsesIncompleteStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *responsesIncompleteStreamExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *responsesIncompleteStreamExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *responsesIncompleteStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
 }
 
@@ -123,13 +179,16 @@ func (e *claudeOAuthHeadersExecutor) HttpRequest(context.Context, *Auth, *http.R
 type resultRecordingHook struct {
 	NoopHook
 	mu      sync.Mutex
+	cond    *sync.Cond
 	results []Result
 }
 
 func (h *resultRecordingHook) OnResult(_ context.Context, result Result) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.ensureCondLocked()
 	h.results = append(h.results, result)
+	h.cond.Broadcast()
 }
 
 func (h *resultRecordingHook) snapshot() []Result {
@@ -138,6 +197,40 @@ func (h *resultRecordingHook) snapshot() []Result {
 	out := make([]Result, len(h.results))
 	copy(out, h.results)
 	return out
+}
+
+func (h *resultRecordingHook) waitForResults(t *testing.T, want int) []Result {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ensureCondLocked()
+	for len(h.results) < want {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("expected %d hook result(s), got %d", want, len(h.results))
+		}
+		timedOut := false
+		timer := time.AfterFunc(remaining, func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			timedOut = true
+			h.cond.Broadcast()
+		})
+		h.cond.Wait()
+		if !timer.Stop() && timedOut && len(h.results) < want {
+			t.Fatalf("expected %d hook result(s), got %d", want, len(h.results))
+		}
+	}
+	out := make([]Result, len(h.results))
+	copy(out, h.results)
+	return out
+}
+
+func (h *resultRecordingHook) ensureCondLocked() {
+	if h.cond == nil {
+		h.cond = sync.NewCond(&h.mu)
+	}
 }
 
 func TestManagerExecute_PublishesRequestedModelMetadataAndSelectedAuth(t *testing.T) {
@@ -228,35 +321,181 @@ func TestManagerExecuteStream_RecordsFailureFromChunkError(t *testing.T) {
 		t.Fatal("expected stream chunk error")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		results := hook.snapshot()
-		if len(results) == 1 {
-			result := results[0]
-			if result.Success {
-				t.Fatalf("hook result Success = true, want false")
-			}
-			if result.AuthID != auth.ID {
-				t.Fatalf("hook result AuthID = %q, want %q", result.AuthID, auth.ID)
-			}
-			if result.Provider != "codex" {
-				t.Fatalf("hook result Provider = %q, want codex", result.Provider)
-			}
-			if result.Model != "gpt-5-codex" {
-				t.Fatalf("hook result Model = %q, want gpt-5-codex", result.Model)
-			}
-			if result.Error == nil || result.Error.Message != chunkErr.Error() {
-				t.Fatalf("hook result Error = %+v, want %q", result.Error, chunkErr.Error())
-			}
-			if result.Error.HTTPStatus != http.StatusBadGateway {
-				t.Fatalf("hook result HTTPStatus = %d, want %d", result.Error.HTTPStatus, http.StatusBadGateway)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	results := hook.waitForResults(t, 1)
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d, want 1", len(results))
+	}
+	result := results[0]
+	if result.Success {
+		t.Fatalf("hook result Success = true, want false")
+	}
+	if result.AuthID != auth.ID {
+		t.Fatalf("hook result AuthID = %q, want %q", result.AuthID, auth.ID)
+	}
+	if result.Provider != "codex" {
+		t.Fatalf("hook result Provider = %q, want codex", result.Provider)
+	}
+	if result.Model != "gpt-5-codex" {
+		t.Fatalf("hook result Model = %q, want gpt-5-codex", result.Model)
+	}
+	if result.Error == nil || result.Error.Message != "stream chunk failed" {
+		t.Fatalf("hook result Error = %+v, want stream chunk failed", result.Error)
+	}
+	if result.Error.Code != "stream_failed" {
+		t.Fatalf("hook result Error.Code = %q, want stream_failed", result.Error.Code)
+	}
+	if result.Error.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("hook result HTTPStatus = %d, want %d", result.Error.HTTPStatus, http.StatusBadGateway)
+	}
+}
+
+func TestManagerExecuteStream_RecordsResponsesFailedAsUpstreamFailure(t *testing.T) {
+	t.Parallel()
+
+	hook := &resultRecordingHook{}
+	manager := NewManager(nil, &FillFirstSelector{}, hook)
+	manager.RegisterExecutor(&responsesFailedStreamExecutor{})
+
+	auth := &Auth{
+		ID:       "responses-failed-auth",
+		Provider: "codex",
+		Status:   StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
 	}
 
-	t.Fatalf("expected 1 hook result, got %d", len(hook.snapshot()))
+	stream, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{
+		Model: "gpt-5-codex",
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() stream = nil")
+	}
+
+	var payload []byte
+	var chunkErr error
+	for chunk := range stream.Chunks {
+		payload = append(payload, chunk.Payload...)
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+		}
+	}
+	if !strings.Contains(string(payload), "response.failed") {
+		t.Fatalf("payload = %q, want response.failed forwarded", string(payload))
+	}
+	if chunkErr == nil {
+		t.Fatal("expected response.failed terminal error")
+	}
+	if strings.Contains(chunkErr.Error(), "response.completed") {
+		t.Fatalf("chunkErr = %v, should not report incomplete stream", chunkErr)
+	}
+	if !strings.Contains(chunkErr.Error(), "Rate limit reached") {
+		t.Fatalf("chunkErr = %v, want upstream message", chunkErr)
+	}
+	statusErr, ok := chunkErr.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("chunkErr status = %v/%v, want %d", statusErr, ok, http.StatusTooManyRequests)
+	}
+
+	results := hook.waitForResults(t, 1)
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d, want 1", len(results))
+	}
+	result := results[0]
+	if result.Success {
+		t.Fatal("hook result Success = true, want false")
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "Rate limit reached") {
+		t.Fatalf("hook result Error = %+v, want upstream failure", result.Error)
+	}
+	if result.Error.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("hook result HTTPStatus = %d, want %d", result.Error.HTTPStatus, http.StatusTooManyRequests)
+	}
+}
+
+func TestManagerExecuteStream_ResponsesIncompleteDoesNotCooldownModel(t *testing.T) {
+	t.Parallel()
+
+	hook := &resultRecordingHook{}
+	manager := NewManager(nil, &FillFirstSelector{}, hook)
+	manager.RegisterExecutor(&responsesIncompleteStreamExecutor{})
+
+	auth := &Auth{
+		ID:       "responses-incomplete-auth",
+		Provider: "codex",
+		Status:   StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{
+		Model: "gpt-5-codex",
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() stream = nil")
+	}
+
+	var chunkErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+		}
+	}
+	if chunkErr == nil {
+		t.Fatal("expected incomplete stream error")
+	}
+	if !strings.Contains(chunkErr.Error(), "response.completed") {
+		t.Fatalf("chunkErr = %v, want incomplete stream error", chunkErr)
+	}
+
+	results := hook.waitForResults(t, 1)
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d, want 1", len(results))
+	}
+	result := results[0]
+	if result.Success {
+		t.Fatal("hook result Success = true, want false")
+	}
+	if result.Error == nil || result.Error.Code != "response_stream_incomplete" {
+		t.Fatalf("hook result Error = %+v, want response_stream_incomplete", result.Error)
+	}
+
+	manager.mu.RLock()
+	updated := manager.auths[auth.ID].Clone()
+	manager.mu.RUnlock()
+	state := updated.ModelStates["gpt-5-codex"]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.LastError == nil || state.LastError.Code != "response_stream_incomplete" {
+		t.Fatalf("LastError = %+v, want response_stream_incomplete", state.LastError)
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("NextRetryAfter = %v, want zero", state.NextRetryAfter)
+	}
+	blocked, reason, next := isAuthBlockedForModel(updated, "gpt-5-codex", time.Now())
+	if blocked {
+		t.Fatalf("isAuthBlockedForModel() blocked reason=%v next=%v, want available", reason, next)
+	}
+
+	stream, err = manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{
+		Model: "gpt-5-codex",
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("second ExecuteStream() error = %v; incomplete stream must not become model_unavailable", err)
+	}
+	if stream == nil {
+		t.Fatal("second ExecuteStream() stream = nil")
+	}
+	for range stream.Chunks {
+	}
 }
 
 func TestManagerExecute_ClaudeOAuth401WithRefreshTokenRecordsHealthFromUpstreamError(t *testing.T) {
@@ -500,36 +739,29 @@ func TestManagerExecuteStream_ClaudeOAuthChunkErrorFallsBackToInitialAnthropicHe
 		t.Fatal("expected stream chunk error")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		results := hook.snapshot()
-		if len(results) != 1 {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		result := results[0]
-		if result.Success {
-			t.Fatal("hook result Success = true, want false")
-		}
-		if result.Headers.Get("Anthropic-Ratelimit-Unified-5h-Status") != "rejected" {
-			t.Fatalf("hook headers = %#v, want initial stream rate-limit headers", result.Headers)
-		}
-		got, ok := manager.GetByID(auth.ID)
-		if !ok {
-			t.Fatal("updated auth missing")
-		}
-		state := got.ModelStates[model]
-		if state == nil {
-			t.Fatal("model state missing")
-		}
-		if state.Quota.Window != "5h" || state.Quota.WindowMinutes != 300 {
-			t.Fatalf("quota = %#v, want 5h/300 from initial stream headers", state.Quota)
-		}
-		if !state.NextRetryAfter.Equal(resetAt) {
-			t.Fatalf("NextRetryAfter = %v, want %v", state.NextRetryAfter, resetAt)
-		}
-		return
+	results := hook.waitForResults(t, 1)
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d, want 1", len(results))
 	}
-
-	t.Fatalf("expected 1 hook result, got %d", len(hook.snapshot()))
+	result := results[0]
+	if result.Success {
+		t.Fatal("hook result Success = true, want false")
+	}
+	if result.Headers.Get("Anthropic-Ratelimit-Unified-5h-Status") != "rejected" {
+		t.Fatalf("hook headers = %#v, want initial stream rate-limit headers", result.Headers)
+	}
+	got, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth missing")
+	}
+	state := got.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.Quota.Window != "5h" || state.Quota.WindowMinutes != 300 {
+		t.Fatalf("quota = %#v, want 5h/300 from initial stream headers", state.Quota)
+	}
+	if !state.NextRetryAfter.Equal(resetAt) {
+		t.Fatalf("NextRetryAfter = %v, want %v", state.NextRetryAfter, resetAt)
+	}
 }

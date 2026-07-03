@@ -196,12 +196,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	pendingOutputItems := make([][]byte, 0, 1)
 	pendingOutputKeys := make([]string, 0, 1)
 	pendingSeen := make(map[string]struct{})
+	var streamErr error
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 
 		line = bytes.TrimSpace(line[5:])
+		switch gjson.GetBytes(line, "type").String() {
+		case "response.failed", "error":
+			streamErr = codexResponsesFailedStatusErr(line)
+			continue
+		}
 		if item, key, ok := extractCodexResponsesOutputItemDone(line); ok {
 			if _, exists := pendingSeen[key]; !exists {
 				pendingSeen[key] = struct{}{}
@@ -223,6 +229,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		out := sdktranslator.TranslateNonStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, execCtx.OriginalPayload, body, line, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 		return resp, nil
+	}
+	if streamErr != nil {
+		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), streamErr.Error())
+		return resp, streamErr
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
@@ -384,23 +394,36 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		completed := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			recorder.AppendResponseChunk(line)
 			reporter.appendOutputChunk(line)
 
+			var terminalErr error
+
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
+				switch gjson.GetBytes(data, "type").String() {
+				case "response.completed":
+					completed = true
 					if detail, ok := parseCodexUsage(data); ok {
 						reporter.publish(execCtx.Context, detail)
 					}
+				case "response.failed", "error":
+					terminalErr = codexResponsesFailedStatusErr(data)
 				}
 			}
 
 			chunks := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, execCtx.OriginalPayload, body, bytes.Clone(line), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+			}
+			if terminalErr != nil {
+				recorder.RecordResponseError(terminalErr)
+				reporter.publishFailure(execCtx.Context)
+				out <- cliproxyexecutor.StreamChunk{Err: terminalErr}
+				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -411,9 +434,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			recorder.RecordResponseError(errScan)
 			reporter.publishFailure(execCtx.Context)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
 		}
+		if completed {
+			reporter.ensurePublished(execCtx.Context)
+			return
+		}
+		streamErr := newCodexResponsesIncompleteError()
+		recorder.RecordResponseError(streamErr)
+		reporter.publishFailure(execCtx.Context)
+		out <- cliproxyexecutor.StreamChunk{Err: streamErr}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func newCodexResponsesIncompleteError() *cliproxyauth.Error {
+	return &cliproxyauth.Error{
+		Code:       "response_stream_incomplete",
+		Message:    "upstream responses stream closed before response.completed",
+		Retryable:  true,
+		HTTPStatus: http.StatusBadGateway,
+	}
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

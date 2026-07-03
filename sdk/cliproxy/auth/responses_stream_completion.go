@@ -3,17 +3,23 @@ package auth
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
-const responsesStreamCompletedType = "response.completed"
+const (
+	responsesStreamCompletedType = "response.completed"
+	responsesStreamFailedType    = "response.failed"
+	responsesStreamErrorType     = "error"
+)
 
 type responsesStreamCompletionTracker struct {
-	buffer    []byte
-	completed bool
+	buffer      []byte
+	completed   bool
+	terminalErr error
 }
 
 func newResponsesStreamCompletionTracker(sourceFormat sdktranslator.Format) *responsesStreamCompletionTracker {
@@ -24,7 +30,12 @@ func newResponsesStreamCompletionTracker(sourceFormat sdktranslator.Format) *res
 }
 
 func (t *responsesStreamCompletionTracker) Observe(chunk []byte) {
-	if t == nil || t.completed || len(chunk) == 0 {
+	if t == nil || t.completed || t.terminalErr != nil || len(chunk) == 0 {
+		return
+	}
+	if completed, err := responsesSSEBlockTerminalState(chunk); completed || err != nil {
+		t.completed = completed
+		t.terminalErr = err
 		return
 	}
 	t.buffer = append(t.buffer, chunk...)
@@ -34,8 +45,10 @@ func (t *responsesStreamCompletionTracker) Observe(chunk []byte) {
 			return
 		}
 		t.buffer = rest
-		if responsesSSEBlockCompleted(block) {
-			t.completed = true
+		completed, err := responsesSSEBlockTerminalState(block)
+		if completed || err != nil {
+			t.completed = completed
+			t.terminalErr = err
 			return
 		}
 	}
@@ -45,15 +58,71 @@ func (t *responsesStreamCompletionTracker) ErrIfIncomplete() error {
 	if t == nil || t.completed {
 		return nil
 	}
-	if len(bytes.TrimSpace(t.buffer)) > 0 && responsesSSEBlockCompleted(t.buffer) {
-		return nil
+	if t.terminalErr != nil {
+		return t.terminalErr
 	}
+	if len(bytes.TrimSpace(t.buffer)) > 0 {
+		completed, err := responsesSSEBlockTerminalState(t.buffer)
+		if completed {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return newResponsesStreamIncompleteError()
+}
+
+func newResponsesStreamIncompleteError() *Error {
 	return &Error{
 		Code:       "response_stream_incomplete",
 		Message:    "upstream responses stream closed before response.completed",
 		Retryable:  true,
 		HTTPStatus: http.StatusBadGateway,
 	}
+}
+
+func responsesSSEBlockTerminalState(block []byte) (bool, error) {
+	for _, event := range parseResponsesSSEEvents(block) {
+		completed, err := responsesSSEEventTerminalState(event.eventType, event.data)
+		if completed || err != nil {
+			return completed, err
+		}
+	}
+	return false, nil
+}
+
+func responsesSSEEventTerminalState(eventType string, data string) (bool, error) {
+	if eventType == responsesStreamCompletedType {
+		return true, nil
+	}
+	if eventType == responsesStreamFailedType || eventType == responsesStreamErrorType {
+		if strings.TrimSpace(data) == "" {
+			return false, nil
+		}
+		return false, responsesStreamTerminalError(eventType, data)
+	}
+	if data == "" || data == "[DONE]" {
+		return false, nil
+	}
+	var payload responsesStreamTerminalPayload
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return false, nil
+	}
+	payloadType := strings.TrimSpace(payload.Type)
+	switch payloadType {
+	case responsesStreamCompletedType:
+		return true, nil
+	case responsesStreamFailedType, responsesStreamErrorType:
+		return false, responsesStreamTerminalError(payloadType, data)
+	default:
+		return false, nil
+	}
+}
+
+type responsesSSEEvent struct {
+	eventType string
+	data      string
 }
 
 func takeSSEBlock(buffer []byte) ([]byte, []byte, bool) {
@@ -91,37 +160,130 @@ func firstSSEBlockEnd(buffer []byte) (int, int) {
 	return best, bestLen
 }
 
-func responsesSSEBlockCompleted(block []byte) bool {
+func parseResponsesSSEEvents(block []byte) []responsesSSEEvent {
+	events := make([]responsesSSEEvent, 0, 1)
 	var eventType string
 	var dataLines []string
+
+	flush := func() {
+		if eventType == "" && len(dataLines) == 0 {
+			return
+		}
+		events = append(events, responsesSSEEvent{
+			eventType: strings.TrimSpace(eventType),
+			data:      strings.TrimSpace(strings.Join(dataLines, "\n")),
+		})
+		eventType = ""
+		dataLines = nil
+	}
+
 	for _, rawLine := range bytes.Split(block, []byte("\n")) {
 		line := strings.TrimSpace(strings.TrimSuffix(string(rawLine), "\r"))
 		if line == "" || strings.HasPrefix(line, ":") {
+			if line == "" {
+				flush()
+			}
 			continue
 		}
 		if value, ok := strings.CutPrefix(line, "event:"); ok {
+			if eventType != "" || len(dataLines) > 0 {
+				flush()
+			}
 			eventType = strings.TrimSpace(value)
 			continue
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
-			dataLines = append(dataLines, strings.TrimSpace(value))
+			data := strings.TrimSpace(value)
+			if eventType == "" && len(dataLines) > 0 && responsesSSEDataLooksStandaloneEvent(strings.Join(dataLines, "\n")) && responsesSSEDataLooksStandaloneEvent(data) {
+				flush()
+			}
+			dataLines = append(dataLines, data)
 		}
 	}
-	if eventType == responsesStreamCompletedType {
+	flush()
+	return events
+}
+
+func responsesSSEDataLooksStandaloneEvent(data string) bool {
+	data = strings.TrimSpace(data)
+	if data == "" || data == "[DONE]" {
 		return true
 	}
-	if len(dataLines) == 0 {
+	if !json.Valid([]byte(data)) {
 		return false
 	}
-	data := strings.TrimSpace(strings.Join(dataLines, "\n"))
-	if data == "" || data == "[DONE]" {
-		return false
-	}
-	var payload struct {
-		Type string `json:"type"`
-	}
+	var payload responsesStreamTerminalPayload
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
 		return false
 	}
-	return strings.TrimSpace(payload.Type) == responsesStreamCompletedType
+	return strings.TrimSpace(payload.Type) != "" || strings.TrimSpace(payload.Response.Error.Message) != "" || strings.TrimSpace(payload.Error.Message) != ""
+}
+
+type responsesStreamTerminalPayload struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Error   struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+	Response struct {
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	} `json:"response"`
+}
+
+func responsesStreamTerminalError(eventType string, data string) *Error {
+	payload := responsesStreamTerminalPayload{Type: eventType}
+	if strings.TrimSpace(data) != "" && json.Valid([]byte(data)) {
+		_ = json.Unmarshal([]byte(data), &payload)
+	}
+	code := firstNonEmpty(payload.Response.Error.Code, payload.Error.Code, payload.Code)
+	errType := firstNonEmpty(payload.Response.Error.Type, payload.Error.Type, payload.Type, eventType)
+	message := firstNonEmpty(payload.Response.Error.Message, payload.Error.Message, payload.Message)
+	if message == "" {
+		message = fmt.Sprintf("upstream responses stream ended with %s", firstNonEmpty(payload.Type, eventType, responsesStreamErrorType))
+	}
+	return &Error{
+		Code:       firstNonEmpty(code, errType, "response_stream_terminal_error"),
+		Message:    message,
+		Retryable:  responsesStreamTerminalRetryable(code, errType),
+		HTTPStatus: responsesStreamTerminalHTTPStatus(code, errType),
+	}
+}
+
+func responsesStreamTerminalHTTPStatus(code string, errType string) int {
+	lower := strings.ToLower(code + " " + errType)
+	switch {
+	case strings.Contains(lower, "rate_limit") || strings.Contains(lower, "quota"):
+		return http.StatusTooManyRequests
+	case strings.Contains(lower, "invalid_request"):
+		return http.StatusBadRequest
+	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "authentication"):
+		return http.StatusUnauthorized
+	case strings.Contains(lower, "forbidden") || strings.Contains(lower, "permission"):
+		return http.StatusForbidden
+	case strings.Contains(lower, "timeout"):
+		return http.StatusRequestTimeout
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func responsesStreamTerminalRetryable(code string, errType string) bool {
+	status := responsesStreamTerminalHTTPStatus(code, errType)
+	return status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= http.StatusInternalServerError
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

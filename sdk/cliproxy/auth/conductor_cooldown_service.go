@@ -219,6 +219,14 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 		auth.LastError = cloneError(result.Error)
 		auth.StatusMessage = result.Error.Message
 	}
+	if isResponseStreamIncompleteError(result.Error) {
+		state.Unavailable = false
+		state.NextRetryAfter = time.Time{}
+		auth.Status = StatusError
+		auth.UpdatedAt = now
+		updateAggregatedAvailability(auth, now)
+		return
+	}
 
 	statusCode := statusCodeFromResult(result.Error)
 	switch statusCode {
@@ -274,6 +282,10 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 	auth.Status = StatusError
 	auth.UpdatedAt = now
 	updateAggregatedAvailability(auth, now)
+}
+
+func isResponseStreamIncompleteError(err *Error) bool {
+	return err != nil && strings.TrimSpace(err.Code) == "response_stream_incomplete"
 }
 
 func (s cooldownService) applyRegistryEffects(result Result, effects resultStateEffects) {
