@@ -551,6 +551,45 @@ func TestOpenCodeGoExecutorRoutesGLM52ClaudeToChatCompletionsWithCacheControl(t 
 	}
 }
 
+func TestOpenCodeGoExecutorPreservesGLM52ToolResultCacheControl(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_glm","object":"chat.completion","created":1,"model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":101,"completion_tokens":2,"total_tokens":103,"prompt_tokens_details":{"cached_tokens":10}}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+	payload := []byte(`{"model":"glm-5.2","max_tokens":32,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"README.md"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"file contents","cache_control":{"type":"ephemeral"}}]}]}`)
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	messages := gjson.GetBytes(gotBody, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want 2; body=%s", len(messages), gotBody)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[1].role = %q, want tool; body=%s", got, gotBody)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "file contents" {
+		t.Fatalf("tool content text = %q, want file contents; body=%s", got, gotBody)
+	}
+	if got := messages[1].Get("content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool cache_control = %q, want ephemeral; body=%s", got, gotBody)
+	}
+}
+
 func TestOpenCodeGoExecutorSupportsResponsesAPIForOpenAIModels(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
