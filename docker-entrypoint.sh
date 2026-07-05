@@ -12,6 +12,7 @@ case "${1:-}" in
     if [ -e /CLIProxyAPI/config.yaml ]; then
       chown clirelay:clirelay /CLIProxyAPI/config.yaml 2>/dev/null || true
     fi
+    su-exec clirelay:clirelay /usr/local/bin/migrate-sqlite-to-postgres.sh
     exec su-exec clirelay:clirelay "$@"
     ;;
   *)

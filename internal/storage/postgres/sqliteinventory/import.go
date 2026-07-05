@@ -27,10 +27,12 @@ type ImportOptions struct {
 }
 
 type ImportReport struct {
-	SQLitePath string              `json:"sqlite_path"`
-	ScannedAt  time.Time           `json:"scanned_at"`
-	DryRun     bool                `json:"dry_run"`
-	Tables     []ImportTableReport `json:"tables"`
+	SQLitePath        string              `json:"sqlite_path"`
+	ScannedAt         time.Time           `json:"scanned_at"`
+	DryRun            bool                `json:"dry_run"`
+	Skipped           bool                `json:"skipped,omitempty"`
+	SourceFingerprint string              `json:"source_fingerprint"`
+	Tables            []ImportTableReport `json:"tables"`
 }
 
 type ImportTableReport struct {
@@ -94,6 +96,7 @@ func Import(ctx context.Context, opts ImportOptions) (ImportReport, error) {
 	if err != nil {
 		return ImportReport{}, err
 	}
+	sourceFingerprint := importSourceFingerprint(inventory)
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -108,12 +111,35 @@ func Import(ctx context.Context, opts ImportOptions) (ImportReport, error) {
 		return ImportReport{}, err
 	}
 	defer dst.Close()
+	if !opts.DryRun {
+		unlock, err := lockImport(ctx, dst)
+		if err != nil {
+			return ImportReport{}, err
+		}
+		defer unlock()
+		if err := ensureImportRunsTable(ctx, dst); err != nil {
+			return ImportReport{}, err
+		}
+		completed, err := importCompleted(ctx, dst, sourceFingerprint)
+		if err != nil {
+			return ImportReport{}, err
+		}
+		if completed {
+			return ImportReport{
+				SQLitePath:        inventory.Path,
+				ScannedAt:         now.UTC(),
+				DryRun:            opts.DryRun,
+				Skipped:           true,
+				SourceFingerprint: sourceFingerprint,
+			}, nil
+		}
+	}
 
 	sourceColumns := make(map[string][]string, len(inventory.Tables))
 	for _, table := range inventory.Tables {
 		sourceColumns[table.Name] = table.Columns
 	}
-	report := ImportReport{SQLitePath: inventory.Path, ScannedAt: now.UTC(), DryRun: opts.DryRun}
+	report := ImportReport{SQLitePath: inventory.Path, ScannedAt: now.UTC(), DryRun: opts.DryRun, SourceFingerprint: sourceFingerprint}
 	for _, table := range runtimeImportTables {
 		srcCols, ok := sourceColumns[table]
 		if !ok {
@@ -125,7 +151,88 @@ func Import(ctx context.Context, opts ImportOptions) (ImportReport, error) {
 		}
 		report.Tables = append(report.Tables, row)
 	}
+	if !opts.DryRun {
+		if err := markImportCompleted(ctx, dst, sourceFingerprint, inventory.Path, report); err != nil {
+			return ImportReport{}, err
+		}
+	}
 	return report, nil
+}
+
+func importSourceFingerprint(inventory Inventory) string {
+	tables := make(map[string]TableStats, len(inventory.Tables))
+	for _, table := range inventory.Tables {
+		tables[table.Name] = table
+	}
+	hash := sha256.New()
+	for _, name := range runtimeImportTables {
+		table, ok := tables[name]
+		if !ok {
+			continue
+		}
+		_, _ = fmt.Fprintf(hash, "%s\t%d\t%s\n", table.Name, table.RowCount, table.Checksum)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func lockImport(ctx context.Context, db *sql.DB) (func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite import: reserve postgres lock connection: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext('clirelay_sqlite_import')::bigint)`); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("sqlite import: acquire postgres advisory lock: %w", err)
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext('clirelay_sqlite_import')::bigint)`)
+		_ = conn.Close()
+	}, nil
+}
+
+func ensureImportRunsTable(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS sqlite_import_runs (
+			source_fingerprint TEXT PRIMARY KEY,
+			sqlite_path TEXT NOT NULL,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			report JSONB NOT NULL DEFAULT '{}'::jsonb
+		)
+	`); err != nil {
+		return fmt.Errorf("sqlite import: create import runs table: %w", err)
+	}
+	return nil
+}
+
+func importCompleted(ctx context.Context, db *sql.DB, sourceFingerprint string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM sqlite_import_runs
+		 WHERE source_fingerprint = ?
+	`, sourceFingerprint).Scan(&count); err != nil {
+		return false, fmt.Errorf("sqlite import: read import completion marker: %w", err)
+	}
+	return count > 0, nil
+}
+
+func markImportCompleted(ctx context.Context, db *sql.DB, sourceFingerprint, sqlitePath string, report ImportReport) error {
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("sqlite import: marshal import report: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO sqlite_import_runs (source_fingerprint, sqlite_path, started_at, completed_at, report)
+		VALUES (?, ?, now(), now(), ?::jsonb)
+		ON CONFLICT (source_fingerprint) DO UPDATE
+		   SET sqlite_path = EXCLUDED.sqlite_path,
+		       completed_at = now(),
+		       report = EXCLUDED.report
+	`, sourceFingerprint, sqlitePath, string(payload)); err != nil {
+		return fmt.Errorf("sqlite import: mark import completed: %w", err)
+	}
+	return nil
 }
 
 func importTable(ctx context.Context, src, dst *sql.DB, table string, srcCols []string, dryRun bool) (ImportTableReport, error) {

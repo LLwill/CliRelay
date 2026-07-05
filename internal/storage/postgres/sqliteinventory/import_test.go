@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ func TestImportSQLiteDryRunAndApply(t *testing.T) {
 	}
 	defer pgDB.Close()
 	if _, err := pgDB.Exec(`
+		DROP TABLE IF EXISTS sqlite_import_runs;
 		TRUNCATE
 			request_log_content,
 			request_logs,
@@ -116,6 +118,120 @@ func TestImportSQLiteDryRunAndApply(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("imported request log count = %d", count)
+	}
+	second, err := Import(ctx, opts)
+	if err != nil {
+		t.Fatalf("second apply import: %v", err)
+	}
+	if !second.Skipped {
+		t.Fatalf("second apply should use completion marker, got %#v", second)
+	}
+}
+
+func TestImportSQLiteApplyUsesPostgresLockAndCompletionMarker(t *testing.T) {
+	dsn := os.Getenv("CLIRELAY_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CLIRELAY_POSTGRES_TEST_DSN is not set")
+	}
+	ctx := context.Background()
+	pgDB, err := postgresstore.OpenRuntimeDB(ctx, config.PostgresConfig{DSN: dsn, MaxOpenConns: 4, MaxIdleConns: 1})
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer pgDB.Close()
+	if _, err := pgDB.Exec(`
+		DROP TABLE IF EXISTS sqlite_import_runs;
+		TRUNCATE
+			request_log_content,
+			request_logs,
+			api_keys
+		RESTART IDENTITY CASCADE
+	`); err != nil {
+		t.Fatalf("reset postgres: %v", err)
+	}
+
+	sqlitePath := filepath.Join(t.TempDir(), "usage.db")
+	sqliteDB, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := sqliteDB.Exec(`
+		CREATE TABLE api_keys (
+			key TEXT PRIMARY KEY,
+			id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			allowed_models TEXT NOT NULL DEFAULT '[]'
+		);
+		CREATE TABLE request_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME NOT NULL,
+			api_key TEXT NOT NULL,
+			api_key_id TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			failed INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO api_keys (key, id, name, allowed_models)
+		VALUES ('fixture-key-lock', 'key-lock', 'Key Lock', '["gpt-test"]');
+		INSERT INTO request_logs (id, timestamp, api_key, api_key_id, model, failed, total_tokens)
+		VALUES (11, '2026-07-05T02:00:00Z', 'fixture-key-lock', 'key-lock', 'gpt-test', 0, 22);
+	`); err != nil {
+		t.Fatalf("seed sqlite: %v", err)
+	}
+	if err := sqliteDB.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+
+	opts := ImportOptions{
+		SQLitePath:  sqlitePath,
+		PostgresDSN: dsn,
+		DryRun:      false,
+		Now:         time.Date(2026, 7, 5, 5, 0, 0, 0, time.UTC),
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	reports := make(chan ImportReport, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			report, err := Import(ctx, opts)
+			if err != nil {
+				errs <- err
+				return
+			}
+			reports <- report
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(reports)
+	for err := range errs {
+		t.Fatalf("concurrent import: %v", err)
+	}
+	var applied, skipped int
+	for report := range reports {
+		if report.Skipped {
+			skipped++
+		} else {
+			applied++
+		}
+	}
+	if applied != 1 || skipped != 1 {
+		t.Fatalf("applied=%d skipped=%d, want 1/1", applied, skipped)
+	}
+	var count int
+	if err := pgDB.QueryRow("SELECT COUNT(*) FROM request_logs WHERE id = 11 AND api_key = 'fixture-key-lock'").Scan(&count); err != nil {
+		t.Fatalf("count imported request log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("imported request log count = %d", count)
+	}
+	if err := pgDB.QueryRow("SELECT COUNT(*) FROM sqlite_import_runs").Scan(&count); err != nil {
+		t.Fatalf("count import markers: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("import marker count = %d", count)
 	}
 }
 

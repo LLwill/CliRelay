@@ -18,8 +18,10 @@ func TestDeployWorkflowOnlyPublishesBackendBinary(t *testing.T) {
 
 	for _, want := range []string{
 		`Upload binary and deploy script`,
-		`source: "cli-proxy-api-new,scripts/deploy-blue-green.sh"`,
+		`source: "cli-proxy-api-new,scripts/deploy-blue-green.sh,scripts/migrate-sqlite-to-postgres.sh,scripts/prepare-runtime-data-stack.sh"`,
 		`scripts/deploy-blue-green.sh`,
+		`scripts/migrate-sqlite-to-postgres.sh`,
+		`scripts/prepare-runtime-data-stack.sh`,
 		`target: "/opt/clirelay2/"`,
 	} {
 		if !strings.Contains(content, want) {
@@ -73,6 +75,10 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("deploy script syntax failed: %v\n%s", err, out)
 	}
+	cmd = exec.Command("bash", "-n", "scripts/prepare-runtime-data-stack.sh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("runtime data stack script syntax failed: %v\n%s", err, out)
+	}
 
 	data, err := os.ReadFile("scripts/deploy-blue-green.sh")
 	if err != nil {
@@ -86,6 +92,7 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 		`HEALTH_TIMEOUT_SECONDS`,
 		`MIN_AVAILABLE_MB`,
 		`NGINX_CONTAINER`,
+		`EnvironmentFile=`,
 		`docker exec "$NGINX_CONTAINER" nginx -t`,
 		`nginx -t`,
 		`DRAIN_SECONDS`,
