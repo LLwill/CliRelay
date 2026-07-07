@@ -394,6 +394,7 @@ func TestConfigSynthesizer_ClineKeys(t *testing.T) {
 					ProxyURL:            "http://proxy",
 					ProxyID:             "hk",
 					Headers:             map[string]string{"X-Test": "yes"},
+					Models:              []config.ClineModel{{Name: "cline-pass/mimo-v2.5-pro", Alias: "mimo"}},
 					ExcludedModels:      []string{"cline-pass/minimax-m3"},
 					VisionFallbackModel: "cline-pass/mimo-v2.5-pro",
 				},
@@ -426,8 +427,8 @@ func TestConfigSynthesizer_ClineKeys(t *testing.T) {
 	if auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["excluded_models"] != "cline-pass/minimax-m3" {
 		t.Fatalf("expected api key metadata, got %#v", auth.Attributes)
 	}
-	if auth.Attributes["models_hash"] != "" || auth.Attributes["vision_fallback_model"] != "" {
-		t.Fatalf("expected ClinePass per-key model metadata to be ignored, got %#v", auth.Attributes)
+	if auth.Attributes["models_hash"] == "" || auth.Attributes["vision_fallback_model"] != "cline-pass/mimo-v2.5-pro" {
+		t.Fatalf("expected ClinePass per-key model metadata, got %#v", auth.Attributes)
 	}
 }
 

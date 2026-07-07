@@ -512,103 +512,6 @@ func (s *Service) deleteClineKeyByIndex(index int) {
 	s.cfg.SanitizeClineKeys()
 }
 
-func NormalizeBedrockKey(entry *config.BedrockKey) {
-	if entry == nil {
-		return
-	}
-	entry.Name = strings.TrimSpace(entry.Name)
-	entry.Prefix = strings.TrimSpace(entry.Prefix)
-	entry.AuthMode = strings.TrimSpace(entry.AuthMode)
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.AccessKeyID = strings.TrimSpace(entry.AccessKeyID)
-	entry.SecretAccessKey = strings.TrimSpace(entry.SecretAccessKey)
-	entry.SessionToken = strings.TrimSpace(entry.SessionToken)
-	entry.Region = strings.TrimSpace(entry.Region)
-	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
-	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	if len(entry.Models) == 0 {
-		return
-	}
-	normalized := make([]config.BedrockModel, 0, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		model.Name = strings.TrimSpace(model.Name)
-		model.Alias = strings.TrimSpace(model.Alias)
-		if model.Name == "" && model.Alias == "" {
-			continue
-		}
-		normalized = append(normalized, model)
-	}
-	entry.Models = normalized
-}
-
-func NormalizeOpenCodeGoKey(entry *config.OpenCodeGoKey) {
-	if entry == nil {
-		return
-	}
-	entry.Name = strings.TrimSpace(entry.Name)
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.Prefix = strings.TrimSpace(entry.Prefix)
-	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
-	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.Models = nil
-	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
-	if workspaceID, err := normalizeOpenCodeGoWorkspaceID(entry.WorkspaceID); err == nil {
-		entry.WorkspaceID = workspaceID
-	} else {
-		entry.WorkspaceID = strings.TrimSpace(entry.WorkspaceID)
-	}
-	entry.AuthCookie = strings.TrimSpace(entry.AuthCookie)
-}
-
-func NormalizedOpenCodeGoKeyEntries(entries []config.OpenCodeGoKey) []config.OpenCodeGoKey {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make([]config.OpenCodeGoKey, len(entries))
-	for i := range entries {
-		out[i] = entries[i]
-		NormalizeOpenCodeGoKey(&out[i])
-	}
-	return out
-}
-
-func NormalizeClineKey(entry *config.ClineKey) {
-	if entry == nil {
-		return
-	}
-	entry.Name = strings.TrimSpace(entry.Name)
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.Prefix = strings.TrimSpace(entry.Prefix)
-	entry.BaseURL = strings.TrimSuffix(strings.TrimSpace(entry.BaseURL), "/")
-	if entry.BaseURL == "" {
-		entry.BaseURL = config.DefaultClineBaseURL
-	}
-	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
-	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.Models = nil
-	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
-}
-
-func NormalizedClineKeyEntries(entries []config.ClineKey) []config.ClineKey {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make([]config.ClineKey, len(entries))
-	for i := range entries {
-		out[i] = entries[i]
-		NormalizeClineKey(&out[i])
-	}
-	return out
-}
-
 type OllamaCloudPatch struct {
 	APIKey         *string                    `json:"api-key"`
 	Name           *string                    `json:"name"`
@@ -620,6 +523,7 @@ type OllamaCloudPatch struct {
 	Headers        *map[string]string         `json:"headers"`
 	Models         *[]config.OllamaCloudModel `json:"models"`
 	ExcludedModels *[]string                  `json:"excluded-models"`
+	VisionFallback *string                    `json:"vision-fallback-model"`
 }
 
 func (s *Service) OllamaCloudKeys() []config.OllamaCloudKey {
@@ -637,6 +541,9 @@ func (s *Service) ReplaceOllamaCloudKeys(entries []config.OllamaCloudKey) error 
 	for i := range entries {
 		NormalizeOllamaCloudKey(&entries[i])
 		if strings.TrimSpace(entries[i].APIKey) != "" {
+			if err := validateOllamaCloudKeyModels(entries[i]); err != nil {
+				return err
+			}
 			filtered = append(filtered, entries[i])
 		}
 	}
@@ -711,10 +618,16 @@ func (s *Service) PatchOllamaCloudKey(index *int, apiKey *string, name *string, 
 	if patch.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*patch.ExcludedModels)
 	}
+	if patch.VisionFallback != nil {
+		entry.VisionFallbackModel = strings.TrimSpace(*patch.VisionFallback)
+	}
 	NormalizeOllamaCloudKey(&entry)
 	if entry.APIKey == "" {
 		s.deleteOllamaCloudKeyByIndex(targetIndex)
 		return nil
+	}
+	if err := validateOllamaCloudKeyModels(entry); err != nil {
+		return err
 	}
 	prev := append([]config.OllamaCloudKey(nil), s.cfg.OllamaCloudKey...)
 	s.cfg.OllamaCloudKey[targetIndex] = entry
@@ -765,6 +678,103 @@ func (s *Service) deleteOllamaCloudKeyByIndex(index int) {
 	s.cfg.SanitizeOllamaCloudKeys()
 }
 
+func NormalizeBedrockKey(entry *config.BedrockKey) {
+	if entry == nil {
+		return
+	}
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.AuthMode = strings.TrimSpace(entry.AuthMode)
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.AccessKeyID = strings.TrimSpace(entry.AccessKeyID)
+	entry.SecretAccessKey = strings.TrimSpace(entry.SecretAccessKey)
+	entry.SessionToken = strings.TrimSpace(entry.SessionToken)
+	entry.Region = strings.TrimSpace(entry.Region)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.BedrockModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func NormalizeOpenCodeGoKey(entry *config.OpenCodeGoKey) {
+	if entry == nil {
+		return
+	}
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.Models = config.NormalizeOpenCodeGoModels(entry.Models)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
+	if workspaceID, err := normalizeOpenCodeGoWorkspaceID(entry.WorkspaceID); err == nil {
+		entry.WorkspaceID = workspaceID
+	} else {
+		entry.WorkspaceID = strings.TrimSpace(entry.WorkspaceID)
+	}
+	entry.AuthCookie = strings.TrimSpace(entry.AuthCookie)
+}
+
+func NormalizedOpenCodeGoKeyEntries(entries []config.OpenCodeGoKey) []config.OpenCodeGoKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.OpenCodeGoKey, len(entries))
+	for i := range entries {
+		out[i] = entries[i]
+		NormalizeOpenCodeGoKey(&out[i])
+	}
+	return out
+}
+
+func NormalizeClineKey(entry *config.ClineKey) {
+	if entry == nil {
+		return
+	}
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSuffix(strings.TrimSpace(entry.BaseURL), "/")
+	if entry.BaseURL == "" {
+		entry.BaseURL = config.DefaultClineBaseURL
+	}
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.Models = config.NormalizeClineModels(entry.Models)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
+}
+
+func NormalizedClineKeyEntries(entries []config.ClineKey) []config.ClineKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.ClineKey, len(entries))
+	for i := range entries {
+		out[i] = entries[i]
+		NormalizeClineKey(&out[i])
+	}
+	return out
+}
+
 func NormalizeOllamaCloudKey(entry *config.OllamaCloudKey) {
 	if entry == nil {
 		return
@@ -781,6 +791,7 @@ func NormalizeOllamaCloudKey(entry *config.OllamaCloudKey) {
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.Models = config.NormalizeOllamaCloudModels(entry.Models)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 }
 
 func NormalizedOllamaCloudKeyEntries(entries []config.OllamaCloudKey) []config.OllamaCloudKey {

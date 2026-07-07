@@ -264,11 +264,12 @@ type OpenCodeGoKey struct {
 
 // OpenCodeGoModel describes a model explicitly enabled for OpenCode Go routing.
 type OpenCodeGoModel struct {
-	Name string `yaml:"name" json:"name"`
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 }
 
 func (m OpenCodeGoModel) GetName() string  { return m.Name }
-func (m OpenCodeGoModel) GetAlias() string { return "" }
+func (m OpenCodeGoModel) GetAlias() string { return m.Alias }
 
 const DefaultClineBaseURL = "https://api.cline.bot/api/v1"
 
@@ -348,7 +349,13 @@ type OllamaCloudKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// VisionFallbackModel is used for image requests whose requested model lacks vision support.
+	VisionFallbackModel string `yaml:"vision-fallback-model,omitempty" json:"vision-fallback-model,omitempty"`
 }
+
+func (k OllamaCloudKey) GetAPIKey() string  { return k.APIKey }
+func (k OllamaCloudKey) GetBaseURL() string { return k.BaseURL }
 
 type OllamaCloudModel struct {
 	Name  string `yaml:"name" json:"name"`

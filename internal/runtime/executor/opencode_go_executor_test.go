@@ -202,7 +202,7 @@ func TestOpenCodeGoExecutorUsesConfiguredNonQwenVisionFallback(t *testing.T) {
 	}
 }
 
-func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) {
+func TestOpenCodeGoExecutorAppliesConfiguredFallbackModel(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -213,7 +213,8 @@ func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) 
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"a description"}}]}`))
 			return
 		}
-		// Actual execution call — text-only model, stays on original model
+		// Actual execution call uses the configured fallback model. Cross-provider
+		// aliases are allowed here; the router resolves them later for the selected auth.
 		gotBody = body
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl_text_only_fallback","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
@@ -239,8 +240,8 @@ func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) 
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
-	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-flash" {
-		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", gotModel, string(gotBody))
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-pro" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-pro; body=%s", gotModel, string(gotBody))
 	}
 }
 

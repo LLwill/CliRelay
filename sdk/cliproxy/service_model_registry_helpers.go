@@ -327,55 +327,25 @@ func buildCodexConfigModels(entry *config.CodexKey, resolveThinking staticThinki
 	return buildConfigModels(entry.Models, "openai", "openai", resolveThinking)
 }
 
-func buildOllamaCloudConfigModels(entry *config.OllamaCloudKey, staticModels []*ModelInfo) []*ModelInfo {
+func buildOpenCodeGoConfigModels(entry *config.OpenCodeGoKey) []*ModelInfo {
 	if entry == nil || len(entry.Models) == 0 {
 		return nil
 	}
-	return buildNamedConfigModels(entry.Models, staticModels, "ollama", "ollama-cloud")
+	return buildConfigModels(entry.Models, "opencode", "opencode-go", nil)
 }
 
-func buildNamedConfigModels[T interface{ GetName() string }](models []T, staticModels []*ModelInfo, ownedBy, modelType string) []*ModelInfo {
-	staticByID := make(map[string]*ModelInfo, len(staticModels))
-	for _, model := range staticModels {
-		if model == nil {
-			continue
-		}
-		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
-			staticByID[id] = model
-		}
+func buildClineConfigModels(entry *config.ClineKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
 	}
+	return buildConfigModels(entry.Models, "cline", "cline", nil)
+}
 
-	now := time.Now().Unix()
-	seen := make(map[string]struct{}, len(models))
-	out := make([]*ModelInfo, 0, len(models))
-	for i := range models {
-		name := strings.TrimSpace(models[i].GetName())
-		if name == "" {
-			continue
-		}
-		key := strings.ToLower(name)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-
-		if model := staticByID[key]; model != nil {
-			clone := *model
-			clone.UserDefined = true
-			out = append(out, &clone)
-			continue
-		}
-		out = append(out, &ModelInfo{
-			ID:          name,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     ownedBy,
-			Type:        modelType,
-			DisplayName: name,
-			UserDefined: true,
-		})
+func buildOllamaCloudConfigModels(entry *config.OllamaCloudKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
 	}
-	return out
+	return buildConfigModels(entry.Models, "ollama", "ollama-cloud", nil)
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

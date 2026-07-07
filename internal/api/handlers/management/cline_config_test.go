@@ -32,8 +32,8 @@ func TestClineKeyManagementPutGetPatchDelete(t *testing.T) {
 	if len(h.cfg.ClineKey) != 1 || h.cfg.ClineKey[0].APIKey != "cline-key" || h.cfg.ClineKey[0].Prefix != "team" || h.cfg.ClineKey[0].BaseURL != config.DefaultClineBaseURL {
 		t.Fatalf("ClineKey after PUT = %+v", h.cfg.ClineKey)
 	}
-	if len(h.cfg.ClineKey[0].Models) != 0 {
-		t.Fatalf("ClineKey models after PUT = %+v, want nil", h.cfg.ClineKey[0].Models)
+	if len(h.cfg.ClineKey[0].Models) != 1 || h.cfg.ClineKey[0].Models[0].Name != "cline-pass/glm-5.2" {
+		t.Fatalf("ClineKey models after PUT = %+v, want sanitized model", h.cfg.ClineKey[0].Models)
 	}
 	if len(h.cfg.ClineKey[0].ExcludedModels) != 1 || h.cfg.ClineKey[0].ExcludedModels[0] != "cline-pass/minimax-m3" {
 		t.Fatalf("ClineKey excluded models after PUT = %+v", h.cfg.ClineKey[0].ExcludedModels)
@@ -50,7 +50,7 @@ func TestClineKeyManagementPutGetPatchDelete(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d body=%s", w.Code, w.Body.String())
 	}
-	if h.cfg.ClineKey[0].Name != "secondary" || h.cfg.ClineKey[0].BaseURL != config.DefaultClineBaseURL || len(h.cfg.ClineKey[0].Models) != 0 || len(h.cfg.ClineKey[0].ExcludedModels) != 2 || h.cfg.ClineKey[0].ExcludedModels[0] != "cline-pass/deepseek-v4-flash" || h.cfg.ClineKey[0].ExcludedModels[1] != "*" || h.cfg.ClineKey[0].VisionFallbackModel != "cline-pass/qwen3.7-vl" {
+	if h.cfg.ClineKey[0].Name != "secondary" || h.cfg.ClineKey[0].BaseURL != config.DefaultClineBaseURL || len(h.cfg.ClineKey[0].Models) != 1 || h.cfg.ClineKey[0].Models[0].Name != "cline-pass/qwen3.7-max" || len(h.cfg.ClineKey[0].ExcludedModels) != 2 || h.cfg.ClineKey[0].ExcludedModels[0] != "cline-pass/deepseek-v4-flash" || h.cfg.ClineKey[0].ExcludedModels[1] != "*" || h.cfg.ClineKey[0].VisionFallbackModel != "cline-pass/qwen3.7-vl" {
 		t.Fatalf("ClineKey after PATCH = %+v", h.cfg.ClineKey[0])
 	}
 
@@ -67,7 +67,7 @@ func TestClineKeyManagementPutGetPatchDelete(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &getBody); err != nil {
 		t.Fatalf("decode GET body: %v", err)
 	}
-	if len(getBody.Items) != 1 || getBody.Items[0].Name != "secondary" || getBody.Items[0].BaseURL != config.DefaultClineBaseURL || len(getBody.Items[0].Models) != 0 || len(getBody.Items[0].ExcludedModels) != 2 || getBody.Items[0].ExcludedModels[0] != "cline-pass/deepseek-v4-flash" || getBody.Items[0].ExcludedModels[1] != "*" || getBody.Items[0].VisionFallbackModel != "cline-pass/qwen3.7-vl" {
+	if len(getBody.Items) != 1 || getBody.Items[0].Name != "secondary" || getBody.Items[0].BaseURL != config.DefaultClineBaseURL || len(getBody.Items[0].Models) != 1 || getBody.Items[0].Models[0].Name != "cline-pass/qwen3.7-max" || len(getBody.Items[0].ExcludedModels) != 2 || getBody.Items[0].ExcludedModels[0] != "cline-pass/deepseek-v4-flash" || getBody.Items[0].ExcludedModels[1] != "*" || getBody.Items[0].VisionFallbackModel != "cline-pass/qwen3.7-vl" {
 		t.Fatalf("GET body = %+v", getBody)
 	}
 
@@ -83,7 +83,7 @@ func TestClineKeyManagementPutGetPatchDelete(t *testing.T) {
 	}
 }
 
-func TestClineKeyManagementDropsPerKeyModels(t *testing.T) {
+func TestClineKeyManagementRejectsNonClinePassModels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("{}\n"), 0o644); err != nil {
@@ -99,10 +99,10 @@ func TestClineKeyManagementDropsPerKeyModels(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/cline-api-key", bytes.NewReader(putBody))
 	h.ProviderKeys().PutClineKeys(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("PUT status = %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PUT status = %d body=%s, want 400", w.Code, w.Body.String())
 	}
-	if got := h.cfg.ClineKey; len(got) != 1 || got[0].APIKey != "cline-key" || len(got[0].Models) != 0 || got[0].VisionFallbackModel != "cline-pass/mimo-v2.5-pro" || len(got[0].ExcludedModels) != 2 || got[0].ExcludedModels[0] != "cline-pass/minimax-m3" || got[0].ExcludedModels[1] != "*" {
-		t.Fatalf("ClineKey after PUT = %+v, want sanitized entry", got)
+	if got := h.cfg.ClineKey; len(got) != 1 || got[0].APIKey != "existing" {
+		t.Fatalf("ClineKey after rejected PUT = %+v, want unchanged existing entry", got)
 	}
 }

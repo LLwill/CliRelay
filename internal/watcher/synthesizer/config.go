@@ -389,6 +389,12 @@ func (s *ConfigSynthesizer) synthesizeClineKeys(ctx *SynthesisContext) []*coreau
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		if hash := diff.ComputeClineModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
+			attrs["vision_fallback_model"] = visionFallbackModel
+		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		label := strings.TrimSpace(entry.Name)
 		if label == "" {
@@ -439,6 +445,7 @@ func (s *ConfigSynthesizer) synthesizeOllamaCloudKeys(ctx *SynthesisContext) []*
 			"source":       fmt.Sprintf("config:ollama-cloud[%s]", token),
 			"api_key":      key,
 			"base_url":     base,
+			"compat_name":  "Ollama Cloud",
 			"provider_key": "ollama-cloud",
 		}
 		if entry.Priority != 0 {
@@ -446,6 +453,9 @@ func (s *ConfigSynthesizer) synthesizeOllamaCloudKeys(ctx *SynthesisContext) []*
 		}
 		if hash := diff.ComputeOllamaCloudModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
+		}
+		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
+			attrs["vision_fallback_model"] = visionFallbackModel
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		label := strings.TrimSpace(entry.Name)

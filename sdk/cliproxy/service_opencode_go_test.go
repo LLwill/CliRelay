@@ -71,7 +71,7 @@ func TestRegisterModelsForAuth_OpenCodeGoRegistersAllDefaultModels(t *testing.T)
 	}
 }
 
-func TestRegisterModelsForAuth_OpenCodeGoIgnoresPerKeyModels(t *testing.T) {
+func TestRegisterModelsForAuth_OpenCodeGoUsesPerKeyModels(t *testing.T) {
 	service := &Service{cfg: &config.Config{
 		OpenCodeGoKey: []config.OpenCodeGoKey{{
 			APIKey: "go-key-explicit",
@@ -100,13 +100,13 @@ func TestRegisterModelsForAuth_OpenCodeGoIgnoresPerKeyModels(t *testing.T) {
 	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetModelsForClient(auth.ID)
-	if len(models) != 20 {
-		t.Fatalf("expected default opencode-go models, got %d: %+v", len(models), models)
+	if len(models) != 2 {
+		t.Fatalf("expected configured opencode-go models, got %d: %+v", len(models), models)
 	}
-	if hasModelID(models, "official-new-model") {
-		t.Fatalf("per-key OpenCode Go model should be ignored; got %+v", models)
+	if !hasModelID(models, "official-new-model") {
+		t.Fatalf("per-key OpenCode Go model should be registered; got %+v", models)
 	}
-	if !hasModelID(models, "deepseek-v4-flash") {
-		t.Fatalf("default OpenCode Go models should be registered; got %+v", models)
+	if hasModelID(models, "deepseek-v4-flash") {
+		t.Fatalf("configured OpenCode Go models should replace defaults; got %+v", models)
 	}
 }

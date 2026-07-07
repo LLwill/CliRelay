@@ -50,8 +50,8 @@ opencode-go-api-key:
 	if len(got.ExcludedModels) != 2 || got.ExcludedModels[0] != "deepseek-v4-pro" || got.ExcludedModels[1] != "*" {
 		t.Fatalf("excluded models = %#v", got.ExcludedModels)
 	}
-	if len(got.Models) != 0 {
-		t.Fatalf("models = %#v, want nil", got.Models)
+	if len(got.Models) != 2 || got.Models[0].Name != "qwen3.7-max" || got.Models[1].Name != "kimi-k2.7-code" {
+		t.Fatalf("models = %#v, want normalized unique models", got.Models)
 	}
 	if got.VisionFallbackModel != "qwen3.5-plus" {
 		t.Fatalf("vision fallback model = %q, want qwen3.5-plus", got.VisionFallbackModel)
@@ -82,8 +82,8 @@ func TestSanitizeOpenCodeGoKeysDropsEmptyAndDeduplicates(t *testing.T) {
 	if cfg.OpenCodeGoKey[1].VisionFallbackModel != "qwen3.6-plus" {
 		t.Fatalf("vision fallback model = %q, want qwen3.6-plus", cfg.OpenCodeGoKey[1].VisionFallbackModel)
 	}
-	if len(cfg.OpenCodeGoKey[1].Models) != 0 {
-		t.Fatalf("models = %#v, want nil", cfg.OpenCodeGoKey[1].Models)
+	if len(cfg.OpenCodeGoKey[1].Models) != 1 || cfg.OpenCodeGoKey[1].Models[0].Name != "glm-5.2" {
+		t.Fatalf("models = %#v, want normalized unique model", cfg.OpenCodeGoKey[1].Models)
 	}
 	if len(cfg.OpenCodeGoKey[1].ExcludedModels) != 2 || cfg.OpenCodeGoKey[1].ExcludedModels[0] != "glm-5.2" || cfg.OpenCodeGoKey[1].ExcludedModels[1] != "*" {
 		t.Fatalf("excluded models = %#v, want normalized exclusions", cfg.OpenCodeGoKey[1].ExcludedModels)

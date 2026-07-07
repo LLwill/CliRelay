@@ -66,7 +66,7 @@ func TestRegisterModelsForAuth_ClineRegistersDefaultModels(t *testing.T) {
 	}
 }
 
-func TestRegisterModelsForAuth_ClineIgnoresPerKeyModels(t *testing.T) {
+func TestRegisterModelsForAuth_ClineUsesPerKeyModels(t *testing.T) {
 	service := &Service{cfg: &config.Config{
 		ClineKey: []config.ClineKey{{
 			APIKey: "cline-key-explicit",
@@ -96,18 +96,18 @@ func TestRegisterModelsForAuth_ClineIgnoresPerKeyModels(t *testing.T) {
 	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetModelsForClient(auth.ID)
-	if len(models) != 9 {
-		t.Fatalf("expected default cline models, got %d: %+v", len(models), models)
+	if len(models) != 1 {
+		t.Fatalf("expected configured cline models after exclusion, got %d: %+v", len(models), models)
 	}
-	if hasModelID(models, "cline-pass/new-model") {
-		t.Fatalf("per-key ClinePass model should be ignored; got %+v", models)
+	if !hasModelID(models, "cline-pass/new-model") {
+		t.Fatalf("per-key ClinePass model should be registered; got %+v", models)
 	}
 	if hasModelID(models, "cline-pass/glm-5.2") {
 		t.Fatalf("specific ClinePass exclusion should be applied; got %+v", models)
 	}
 }
 
-func TestRegisterModelsForAuth_ClineIgnoresPerKeyAlias(t *testing.T) {
+func TestRegisterModelsForAuth_ClineUsesPerKeyAlias(t *testing.T) {
 	service := &Service{cfg: &config.Config{
 		ClineKey: []config.ClineKey{{
 			APIKey: "cline-key-alias",
@@ -135,12 +135,10 @@ func TestRegisterModelsForAuth_ClineIgnoresPerKeyAlias(t *testing.T) {
 	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetModelsForClient(auth.ID)
-	for _, model := range models {
-		if model.ID == "mimo-v2.5-pro" {
-			t.Fatalf("per-key ClinePass alias should be ignored; got %+v", models)
-		}
+	if !hasModelID(models, "mimo-v2.5-pro") {
+		t.Fatalf("per-key ClinePass alias should be registered; got %+v", models)
 	}
-	if !hasModelID(models, "cline-pass/mimo-v2.5-pro") {
-		t.Fatalf("default ClinePass model should be registered; got %+v", models)
+	if hasModelID(models, "cline-pass/mimo-v2.5-pro") {
+		t.Fatalf("aliased ClinePass upstream id should not be registered separately; got %+v", models)
 	}
 }

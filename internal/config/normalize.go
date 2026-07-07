@@ -225,7 +225,7 @@ func (cfg *Config) SanitizeOpenCodeGoKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.ProxyID = strings.TrimSpace(entry.ProxyID)
 		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.Models = nil
+		entry.Models = NormalizeOpenCodeGoModels(entry.Models)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 		entry.WorkspaceID = strings.TrimSpace(entry.WorkspaceID)
@@ -251,7 +251,8 @@ func NormalizeOpenCodeGoModels(models []OpenCodeGoModel) []OpenCodeGoModel {
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, OpenCodeGoModel{Name: name})
+		alias := strings.TrimSpace(models[i].Alias)
+		out = append(out, OpenCodeGoModel{Name: name, Alias: alias})
 	}
 	return out
 }
@@ -279,7 +280,7 @@ func (cfg *Config) SanitizeClineKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.ProxyID = strings.TrimSpace(entry.ProxyID)
 		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.Models = nil
+		entry.Models = NormalizeClineModels(entry.Models)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 		out = append(out, entry)
@@ -343,6 +344,7 @@ func (cfg *Config) SanitizeOllamaCloudKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.Models = NormalizeOllamaCloudModels(entry.Models)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 		out = append(out, entry)
 	}
 	cfg.OllamaCloudKey = out

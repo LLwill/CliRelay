@@ -39,6 +39,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "cline":
 		upstreamModel = resolveUpstreamModelForClineAPIKey(cfg, auth, requestedModel)
+	case "ollama-cloud":
+		upstreamModel = resolveUpstreamModelForOllamaCloudAPIKey(cfg, auth, requestedModel)
 	case "bedrock":
 		upstreamModel = resolveUpstreamModelForBedrockAPIKey(cfg, auth, requestedModel)
 	case "vertex":
@@ -128,6 +130,13 @@ func resolveClineAPIKeyConfig(cfg *runtimeConfigSnapshot, auth *Auth) *runtimeAP
 		return nil
 	}
 	return resolveAPIKeyConfig(cfg.ClineKey, auth)
+}
+
+func resolveOllamaCloudAPIKeyConfig(cfg *runtimeConfigSnapshot, auth *Auth) *runtimeAPIKeyModelConfig {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.OllamaCloudKey, auth)
 }
 
 func resolveBedrockAPIKeyConfig(cfg *runtimeConfigSnapshot, auth *Auth) *runtimeBedrockKeyConfig {
@@ -222,6 +231,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *runtimeConfigSnapshot, auth *Auth, 
 
 func resolveUpstreamModelForClineAPIKey(cfg *runtimeConfigSnapshot, auth *Auth, requestedModel string) string {
 	return ""
+}
+
+func resolveUpstreamModelForOllamaCloudAPIKey(cfg *runtimeConfigSnapshot, auth *Auth, requestedModel string) string {
+	entry := resolveOllamaCloudAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
 func resolveUpstreamModelForBedrockAPIKey(cfg *runtimeConfigSnapshot, auth *Auth, requestedModel string) string {

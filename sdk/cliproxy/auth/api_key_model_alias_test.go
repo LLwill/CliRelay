@@ -130,7 +130,7 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		{"gemini-auth", "gp", "gemini-2.5-pro"},
 		{"claude-auth", "cs4", "claude-sonnet-4"},
 		{"codex-auth", "o", "o3"},
-		{"cline-auth", "mimo-v2.5-pro", ""},
+		{"cline-auth", "mimo-v2.5-pro", "cline-pass/mimo-v2.5-pro"},
 		{"bedrock-auth", "aws-sonnet", "claude-sonnet-4-5"},
 	}
 

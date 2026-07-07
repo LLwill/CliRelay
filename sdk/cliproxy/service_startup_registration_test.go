@@ -110,10 +110,10 @@ func TestLoadInitialState_RegistersConfigDerivedClineModels(t *testing.T) {
 	t.Cleanup(func() { reg.UnregisterClient(clineAuth.ID) })
 
 	models := reg.GetModelsForClient(clineAuth.ID)
-	if len(models) != 10 || !hasModelID(models, "cline-pass/mimo-v2.5-pro") {
-		t.Fatalf("expected default ClinePass models registered from config auth %+v, got %+v", clineAuth.Attributes, models)
+	if len(models) != 1 || !hasModelID(models, "mimo-v2.5-pro") {
+		t.Fatalf("expected configured ClinePass alias registered from config auth %+v, got %+v", clineAuth.Attributes, models)
 	}
-	if hasModelID(models, "mimo-v2.5-pro") {
-		t.Fatalf("per-key ClinePass alias should be ignored; got %+v", models)
+	if hasModelID(models, "cline-pass/mimo-v2.5-pro") {
+		t.Fatalf("aliased ClinePass upstream id should not be registered separately; got %+v", models)
 	}
 }

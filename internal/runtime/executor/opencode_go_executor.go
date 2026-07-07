@@ -272,9 +272,6 @@ func applyVisionFallback(req cliproxyexecutor.Request, opts cliproxyexecutor.Opt
 	if fallback == "" || !opencodeGoCurrentRequestHasImage(req.Payload) {
 		return result
 	}
-	if !opencodeGoSupportsNativeVision(fallback) {
-		return result
-	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if strings.EqualFold(baseModel, fallback) || opencodeGoSupportsNativeVision(baseModel) {
 		return result
@@ -290,7 +287,27 @@ func applyVisionFallback(req cliproxyexecutor.Request, opts cliproxyexecutor.Opt
 	return result
 }
 
-func clineVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth) string {
+func openAICompatSupportsVisionFallback(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "cline", "ollama-cloud":
+		return true
+	default:
+		return false
+	}
+}
+
+func openAICompatVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth, provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "cline":
+		return configOpenAICompatVisionFallbackModel(cfg, auth, "cline")
+	case "ollama-cloud":
+		return configOpenAICompatVisionFallbackModel(cfg, auth, "ollama-cloud")
+	default:
+		return ""
+	}
+}
+
+func configOpenAICompatVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth, provider string) string {
 	if auth == nil {
 		return ""
 	}
@@ -312,9 +329,25 @@ func clineVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth) strin
 	if apiKey == "" {
 		return ""
 	}
-	for i := range cfg.ClineKey {
-		entry := &cfg.ClineKey[i]
-		if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "cline":
+		for i := range cfg.ClineKey {
+			entry := &cfg.ClineKey[i]
+			if !strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+				continue
+			}
+			fallback := strings.TrimSpace(entry.VisionFallbackModel)
+			if opencodeGoModelExcluded(fallback, strings.Join(entry.ExcludedModels, ",")) {
+				return ""
+			}
+			return fallback
+		}
+	case "ollama-cloud":
+		for i := range cfg.OllamaCloudKey {
+			entry := &cfg.OllamaCloudKey[i]
+			if !strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+				continue
+			}
 			fallback := strings.TrimSpace(entry.VisionFallbackModel)
 			if opencodeGoModelExcluded(fallback, strings.Join(entry.ExcludedModels, ",")) {
 				return ""
