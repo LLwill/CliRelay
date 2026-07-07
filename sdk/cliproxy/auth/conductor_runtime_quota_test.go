@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -117,6 +118,43 @@ func TestManagerUpdateDoesNotPreserveRuntimeQuotaWhenDisabled(t *testing.T) {
 	}
 	if !updated.Disabled || updated.Status != StatusDisabled {
 		t.Fatalf("expected disabled status to be preserved, got disabled=%v status=%q", updated.Disabled, updated.Status)
+	}
+}
+
+func TestManagerUpdateDropsOllamaCloudNotFoundRuntimeState(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	model := "glm-5.2"
+
+	if _, err := m.Register(ctx, &Auth{
+		ID:       "ollama-auth",
+		Provider: "ollama-cloud",
+		Status:   StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	m.MarkResult(ctx, Result{
+		AuthID:   "ollama-auth",
+		Provider: "ollama-cloud",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Message: "not found", HTTPStatus: http.StatusNotFound},
+	})
+
+	updated, err := m.Update(ctx, &Auth{
+		ID:       "ollama-auth",
+		Provider: "ollama-cloud",
+		Status:   StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("ollama-cloud 404 runtime state survived update: %#v", state)
+	}
+	if updated.Unavailable || updated.Status != StatusActive || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("ollama-cloud auth availability not reset: %#v", updated)
 	}
 }
 

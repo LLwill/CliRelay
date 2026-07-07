@@ -1,6 +1,10 @@
 package auth
 
-import "time"
+import (
+	"net/http"
+	"strings"
+	"time"
+)
 
 func preserveRuntimeFields(dst *Auth, src *Auth) {
 	if dst == nil || src == nil {
@@ -38,6 +42,9 @@ func preserveAvailabilityRuntimeForUpdate(dst *Auth, src *Auth, now time.Time) {
 			if !shouldPreserveModelRuntimeState(dst.ModelStates[model], srcState, now) {
 				continue
 			}
+			if shouldDropOllamaCloudNotFoundRuntimeState(dst, srcState) {
+				continue
+			}
 			dst.ModelStates[model] = srcState.Clone()
 			preservedModelState = true
 		}
@@ -56,7 +63,7 @@ func preserveAvailabilityRuntimeForUpdate(dst *Auth, src *Auth, now time.Time) {
 		}
 	}
 
-	if !shouldPreserveAuthRuntimeState(dst, src, now) {
+	if shouldDropOllamaCloudNotFoundAuthRuntimeState(dst, src) || !shouldPreserveAuthRuntimeState(dst, src, now) {
 		return
 	}
 	dst.Unavailable = src.Unavailable
@@ -65,4 +72,26 @@ func preserveAvailabilityRuntimeForUpdate(dst *Auth, src *Auth, now time.Time) {
 	dst.LastError = cloneError(src.LastError)
 	dst.Quota = src.Quota
 	dst.NextRetryAfter = src.NextRetryAfter
+}
+
+func shouldDropOllamaCloudNotFoundRuntimeState(auth *Auth, state *ModelState) bool {
+	if auth == nil || state == nil || state.LastError == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "ollama-cloud") {
+		return false
+	}
+	// Older builds misrouted Ollama Cloud through OpenAI-compatible chat and
+	// persisted false 404 cooldowns; a real 404 will be recorded again.
+	return state.LastError.HTTPStatus == http.StatusNotFound
+}
+
+func shouldDropOllamaCloudNotFoundAuthRuntimeState(dst *Auth, src *Auth) bool {
+	if dst == nil || src == nil || src.LastError == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(dst.Provider), "ollama-cloud") {
+		return false
+	}
+	return src.LastError.HTTPStatus == http.StatusNotFound
 }

@@ -6,6 +6,7 @@ import (
 
 	managementmodelcatalog "github.com/router-for-me/CLIProxyAPI/v6/internal/management/modelcatalog"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdkmodelcatalog "github.com/router-for-me/CLIProxyAPI/v6/sdk/modelcatalog"
@@ -14,6 +15,31 @@ import (
 type testModelRegistry struct {
 	models       []*sdkmodelcatalog.ModelInfo
 	unregistered bool
+}
+
+func TestRegisterExecutorForAuthOllamaCloudUsesDedicatedExecutorWithCompatMetadata(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "ollama-cloud-auth",
+		Provider: "ollama-cloud",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "ollama-key",
+			"base_url":     config.DefaultOllamaCloudBaseURL,
+			"compat_name":  "Ollama Cloud",
+			"provider_key": "ollama-cloud",
+		},
+	}
+
+	RegisterExecutorForAuth(manager, &config.Config{}, auth, false, nil)
+
+	got, ok := manager.Executor("ollama-cloud")
+	if !ok || got == nil {
+		t.Fatal("expected ollama-cloud executor after bind")
+	}
+	if _, ok := got.(*executor.OllamaCloudExecutor); !ok {
+		t.Fatalf("executor = %T, want *executor.OllamaCloudExecutor", got)
+	}
 }
 
 func (r *testModelRegistry) RegisterClient(_ string, _ string, models []*sdkmodelcatalog.ModelInfo) {
