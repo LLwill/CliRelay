@@ -62,10 +62,7 @@ def go_files(root: Path) -> list[Path]:
     skip_dirs = {".git", ".gocache", ".tmp-go", "vendor"}
     files: list[Path] = []
     for path in root.rglob("*.go"):
-        relative_parts = path.relative_to(root).parts
-        if any(part in skip_dirs for part in relative_parts):
-            continue
-        if relative_parts[:4] == ("internal", "storage", "postgres", "ent"):
+        if any(part in skip_dirs for part in path.relative_to(root).parts):
             continue
         files.append(path)
     return sorted(files)

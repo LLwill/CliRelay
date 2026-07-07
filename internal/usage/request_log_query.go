@@ -69,7 +69,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 	items := make([]LogRow, 0, params.Size)
 	for rows.Next() {
 		var row LogRow
-		var ts storedTime
+		var ts string
 		var failedInt, streamingInt, hasContentInt int
 		if err := rows.Scan(
 			&row.ID, &ts, &row.APIKey, &row.APIKeyName, &row.Model, &row.UpstreamModel, &row.VisionFallbackModel, &row.Source, &row.ChannelName,
@@ -80,9 +80,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 			log.Warnf("usage: scan log row failed: %v", err)
 			return LogQueryResult{}, fmt.Errorf("usage: scan row: %w", err)
 		}
-		if ts.Valid {
-			row.Timestamp = ts.Time
-		}
+		row.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
 		row.Failed = failedInt != 0
 		row.Streaming = streamingInt != 0
 		row.HasContent = hasContentInt != 0
@@ -431,13 +429,8 @@ func ClearRequestLogs(options ClearRequestLogsOptions) (ClearRequestLogsResult, 
 	committed = true
 	refreshRequestLogContentBytes(db)
 
-	if usageDriver == "sqlite" {
-		_, err := db.Exec("VACUUM")
-		if err != nil {
-			log.Warnf("usage: vacuum after request log cleanup failed: %v", err)
-		}
-	} else if err := compactPostgresLogStorage(db); err != nil {
-		log.Warnf("usage: compact request log storage after cleanup failed: %v", err)
+	if _, err := db.Exec("VACUUM"); err != nil {
+		log.Warnf("usage: vacuum after request log cleanup failed: %v", err)
 	}
 
 	if result.DeletedLogs > 0 || result.DeletedContents > 0 || result.ClearedBodyRows > 0 || result.ClearedDetailRows > 0 || result.ClearedLegacyRows > 0 {

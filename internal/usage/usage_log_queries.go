@@ -1,6 +1,9 @@
 package usage
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // QueryLogRowByID returns a single request log row by primary key.
 func QueryLogRowByID(id int64) (LogRow, error) {
@@ -10,7 +13,7 @@ func QueryLogRowByID(id int64) (LogRow, error) {
 	}
 
 	var row LogRow
-	var ts storedTime
+	var ts string
 	var failedInt, streamingInt, hasContentInt int
 	err := db.QueryRow(
 		"SELECT id, timestamp, api_key, api_key_name, model, source, channel_name, auth_index, "+
@@ -29,9 +32,7 @@ func QueryLogRowByID(id int64) (LogRow, error) {
 	if err != nil {
 		return LogRow{}, fmt.Errorf("usage: query log row: %w", err)
 	}
-	if ts.Valid {
-		row.Timestamp = ts.Time
-	}
+	row.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
 	row.Failed = failedInt != 0
 	row.Streaming = streamingInt != 0
 	row.HasContent = hasContentInt != 0

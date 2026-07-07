@@ -30,8 +30,6 @@ func TestDeployWorkflowOnlyPublishesBackendBinary(t *testing.T) {
 	for _, forbidden := range []string{
 		`Upload panel assets`,
 		`source: "manage.html,management.html,assets"`,
-		`scripts/migrate-sqlite-to-postgres.sh`,
-		`scripts/prepare-runtime-data-stack.sh`,
 		`PANEL_SRC=`,
 		`PANEL_DIR=`,
 		`relay-panel`,
@@ -88,7 +86,6 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 		`HEALTH_TIMEOUT_SECONDS`,
 		`MIN_AVAILABLE_MB`,
 		`NGINX_CONTAINER`,
-		`EnvironmentFile=`,
 		`docker exec "$NGINX_CONTAINER" nginx -t`,
 		`nginx -t`,
 		`DRAIN_SECONDS`,
@@ -98,21 +95,11 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 			t.Fatalf("deploy script missing guard %q", want)
 		}
 	}
-	for _, forbidden := range []string{
-		`migrate-sqlite-to-postgres.sh`,
-		`Legacy SQLite`,
-		`stop_active_units_for_migration`,
-		`CLIRELAY_SQLITE_PATH`,
-		`usage.db`,
-	} {
-		if strings.Contains(content, forbidden) {
-			t.Fatalf("deploy script must not run legacy SQLite migration during blue-green deploy, found %q", forbidden)
-		}
-	}
 }
 
 func TestReleaseAndDeployWorkflowsRejectVendoredPanelAssets(t *testing.T) {
 	for _, path := range []string{
+		".github/workflows/pr-test-build.yml",
 		".github/workflows/deploy.yml",
 		".github/workflows/docker-image.yml",
 		".github/workflows/docker-publish.yml",
@@ -125,20 +112,5 @@ func TestReleaseAndDeployWorkflowsRejectVendoredPanelAssets(t *testing.T) {
 		if !strings.Contains(string(data), `./scripts/ensure-no-vendored-panel-assets.sh`) {
 			t.Fatalf("%s must reject committed frontend panel build output", path)
 		}
-	}
-
-	data, err := os.ReadFile(".github/workflows/pr-test-build.yml")
-	if err != nil {
-		t.Fatalf("read PR workflow: %v", err)
-	}
-	if !strings.Contains(string(data), `./scripts/ci-pr.sh`) {
-		t.Fatalf("PR workflow must use the shared PR check script")
-	}
-	data, err = os.ReadFile("scripts/ci-pr.sh")
-	if err != nil {
-		t.Fatalf("read PR check script: %v", err)
-	}
-	if !strings.Contains(string(data), `./scripts/ensure-no-vendored-panel-assets.sh`) {
-		t.Fatalf("PR check script must reject committed frontend panel build output")
 	}
 }

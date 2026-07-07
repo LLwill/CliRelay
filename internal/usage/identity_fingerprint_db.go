@@ -201,7 +201,7 @@ func scanIdentityFingerprint(scanner fingerprintScanner) (*identityfingerprint.L
 	var record identityfingerprint.LearnedRecord
 	var provider string
 	var fieldsJSON, observedJSON string
-	var createdAt, updatedAt, lastSeenAt storedTime
+	var createdAt, updatedAt, lastSeenAt string
 	if err := scanner.Scan(
 		&provider,
 		&record.AccountKey,
@@ -230,15 +230,9 @@ func scanIdentityFingerprint(scanner fingerprintScanner) (*identityfingerprint.L
 			return nil, fmt.Errorf("decode identity fingerprint observed headers: %w", err)
 		}
 	}
-	if createdAt.Valid {
-		record.CreatedAt = createdAt.Time
-	}
-	if updatedAt.Valid {
-		record.UpdatedAt = updatedAt.Time
-	}
-	if lastSeenAt.Valid {
-		record.LastSeenAt = lastSeenAt.Time
-	}
+	record.CreatedAt, _ = parseStoredTime(createdAt)
+	record.UpdatedAt, _ = parseStoredTime(updatedAt)
+	record.LastSeenAt, _ = parseStoredTime(lastSeenAt)
 	return &record, nil
 }
 

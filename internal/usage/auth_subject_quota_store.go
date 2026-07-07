@@ -253,8 +253,8 @@ func QueryQuotaSnapshotPointsByAuthSubject(matcher AuthSubjectMatcher, start, en
 	result := make([]QuotaSnapshotPoint, 0)
 	for rows.Next() {
 		var point QuotaSnapshotPoint
-		var recordedAt storedTime
-		var resetAt storedTime
+		var recordedAt string
+		var resetAt sql.NullString
 		var percent sql.NullFloat64
 		if err := rows.Scan(
 			&recordedAt,
@@ -268,16 +268,17 @@ func QueryQuotaSnapshotPointsByAuthSubject(matcher AuthSubjectMatcher, start, en
 		); err != nil {
 			return nil, fmt.Errorf("usage: quota snapshot points by auth subject scan: %w", err)
 		}
-		if recordedAt.Valid {
-			point.RecordedAt = recordedAt.Time
+		if parsed, ok := parseStoredTime(recordedAt); ok {
+			point.RecordedAt = parsed
 		}
 		if percent.Valid {
 			value := percent.Float64
 			point.Percent = &value
 		}
 		if resetAt.Valid {
-			parsed := resetAt.Time
-			point.ResetAt = &parsed
+			if parsed, ok := parseStoredTime(resetAt.String); ok {
+				point.ResetAt = &parsed
+			}
 		}
 		result = append(result, point)
 	}
@@ -296,9 +297,9 @@ func QueryLatestWeeklyQuotaCycleByAuthSubject(subjectID string, quotaKeys ...str
 	normalizedKeys := dedupeExactStrings(quotaKeys)
 
 	var cycle AuthSubjectQuotaCycle
-	var cycleStartRaw storedTime
-	var resetRaw storedTime
-	var verifiedRaw storedTime
+	var cycleStartRaw string
+	var resetRaw string
+	var verifiedRaw string
 	query := `
 		SELECT subject_id, auth_index, provider, quota_key, cycle_start_at, reset_at, window_seconds, last_verified_at
 		FROM auth_subject_quota_cycles
@@ -333,14 +334,14 @@ func QueryLatestWeeklyQuotaCycleByAuthSubject(subjectID string, quotaKeys ...str
 		}
 		return nil, fmt.Errorf("usage: auth subject quota cycle query: %w", err)
 	}
-	if cycleStartRaw.Valid {
-		cycle.CycleStartAt = cycleStartRaw.Time
+	if parsed, ok := parseStoredTime(cycleStartRaw); ok {
+		cycle.CycleStartAt = parsed
 	}
-	if resetRaw.Valid {
-		cycle.ResetAt = resetRaw.Time
+	if parsed, ok := parseStoredTime(resetRaw); ok {
+		cycle.ResetAt = parsed
 	}
-	if verifiedRaw.Valid {
-		cycle.LastVerifiedAt = verifiedRaw.Time
+	if parsed, ok := parseStoredTime(verifiedRaw); ok {
+		cycle.LastVerifiedAt = parsed
 	}
 	if cycle.CycleStartAt.IsZero() || cycle.ResetAt.IsZero() || cycle.WindowSeconds <= 0 {
 		return nil, nil

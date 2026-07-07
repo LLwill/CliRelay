@@ -16,7 +16,6 @@ const (
 	RuntimeSettingBedrockKeys          = runtimeconfig.RuntimeSettingBedrockKeys
 	RuntimeSettingOpenCodeGoKeys       = runtimeconfig.RuntimeSettingOpenCodeGoKeys
 	RuntimeSettingClineKeys            = runtimeconfig.RuntimeSettingClineKeys
-	RuntimeSettingOllamaCloudKeys      = runtimeconfig.RuntimeSettingOllamaCloudKeys
 	RuntimeSettingOpenAICompatibility  = runtimeconfig.RuntimeSettingOpenAICompatibility
 	RuntimeSettingVertexCompatKeys     = runtimeconfig.RuntimeSettingVertexCompatKeys
 	RuntimeSettingClaudeHeaderDefaults = runtimeconfig.RuntimeSettingClaudeHeaderDefaults

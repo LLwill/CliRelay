@@ -1,12 +1,5 @@
 package config
 
-// PostgresConfig holds the runtime primary database connection settings.
-type PostgresConfig struct {
-	DSN          string `yaml:"dsn" json:"-"`
-	MaxOpenConns int    `yaml:"max-open-conns,omitempty" json:"max-open-conns,omitempty"`
-	MaxIdleConns int    `yaml:"max-idle-conns,omitempty" json:"max-idle-conns,omitempty"`
-}
-
 // RedisConfig holds the configuration for connecting to a Redis instance for data persistence.
 type RedisConfig struct {
 	Enable   bool   `yaml:"enable" json:"enable"`

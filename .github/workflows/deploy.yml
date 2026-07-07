@@ -8,8 +8,6 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      SHOULD_DEPLOY: ${{ github.event_name == 'workflow_dispatch' || vars.CLIRELAY_DEV_AUTO_DEPLOY == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,14 +40,7 @@ jobs:
               -X 'github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo.BuildDate=${BUILD_DATE}'" \
             -o cli-proxy-api-new ./cmd/server/
 
-      - name: Skip automatic server deploy
-        if: env.SHOULD_DEPLOY != 'true'
-        run: |
-          echo "Built dev binary, but server deploy is disabled."
-          echo "Run this workflow manually or set repository variable CLIRELAY_DEV_AUTO_DEPLOY=true after the target server data stack is ready."
-
       - name: Upload binary and deploy script
-        if: env.SHOULD_DEPLOY == 'true'
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -61,7 +52,6 @@ jobs:
           overwrite: true
 
       - name: Blue-green deploy
-        if: env.SHOULD_DEPLOY == 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}

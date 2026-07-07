@@ -33,9 +33,6 @@ type Config struct {
 	// When empty, the process local timezone (time.Local) is used.
 	Timezone string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
 
-	// Postgres config controls the runtime primary database.
-	Postgres PostgresConfig `yaml:"postgres" json:"-"`
-
 	// Redis config controls the Redis connection for usage persistence.
 	Redis RedisConfig `yaml:"redis" json:"redis"`
 
@@ -126,9 +123,6 @@ type Config struct {
 
 	// ClineKey defines ClinePass API key configurations.
 	ClineKey []ClineKey `yaml:"cline-api-key" json:"cline-api-key"`
-
-	// OllamaCloudKey defines Ollama Cloud API key configurations.
-	OllamaCloudKey []OllamaCloudKey `yaml:"ollama-cloud-api-key" json:"ollama-cloud-api-key"`
 
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.

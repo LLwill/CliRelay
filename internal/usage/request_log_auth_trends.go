@@ -86,14 +86,15 @@ func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountP
 
 	byDate := make(map[string]int64, days)
 	for rows.Next() {
-		var ts storedTime
+		var ts string
 		if err := rows.Scan(&ts); err != nil {
 			return nil, fmt.Errorf("usage: daily calls by auth indexes scan: %w", err)
 		}
-		if !ts.Valid {
+		parsed, ok := parseStoredTime(ts)
+		if !ok {
 			continue
 		}
-		byDate[localDayKeyAt(ts.Time)]++
+		byDate[localDayKeyAt(parsed)]++
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -148,14 +149,15 @@ func QueryHourlyCallsByAuthIndex(authIndex string, hours int) ([]HourlyCountPoin
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts storedTime
+		var ts string
 		if err := rows.Scan(&ts); err != nil {
 			return nil, fmt.Errorf("usage: hourly calls by auth index scan: %w", err)
 		}
-		if !ts.Valid {
+		parsed, ok := parseStoredTime(ts)
+		if !ok {
 			continue
 		}
-		key := ts.Time.In(loc).Truncate(time.Hour).Format("2006-01-02 15:00")
+		key := parsed.In(loc).Truncate(time.Hour).Format("2006-01-02 15:00")
 		if bucket := byKey[key]; bucket != nil {
 			bucket.Requests++
 		}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
 	log "github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite"
 )
@@ -119,7 +118,6 @@ var (
 	usageReadDB *sql.DB
 	usageDBMu   sync.Mutex
 	usageDBPath string
-	usageDriver string
 	usageLoc    *time.Location
 )
 
@@ -558,74 +556,42 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 		return fmt.Errorf("usage: ping sqlite read-only handle: %w", err)
 	}
 
-	return initOpenedDBLocked(db, readDB, dbPath, "sqlite", storageCfg, loc, true)
-}
-
-func InitPostgres(pgCfg config.PostgresConfig, storageCfg config.RequestLogStorageConfig, loc *time.Location) error {
-	usageDBMu.Lock()
-	defer usageDBMu.Unlock()
-
-	if usageDB != nil {
-		return nil
-	}
-	if loc == nil {
-		loc = time.Local
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	db, err := postgresstore.OpenRuntimeDB(ctx, pgCfg)
-	if err != nil {
-		return err
-	}
-	return initOpenedDBLocked(db, db, "postgres", "postgres", storageCfg, loc, false)
-}
-
-func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg config.RequestLogStorageConfig, loc *time.Location, runSQLiteBootstrap bool) error {
-	if loc == nil {
-		loc = time.Local
-	}
-	usageLoc = loc
-
 	log.Debugf("usage: creating tables")
-	if runSQLiteBootstrap {
-		if _, err := db.Exec(createTableSQL); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("usage: create table: %w", err)
-		}
+	if _, err := db.Exec(createTableSQL); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("usage: create table: %w", err)
 	}
+
 	usageDB = db
 	usageReadDB = readDB
 	usageDBPath = dbPath
-	usageDriver = driver
 	requestLogStorage = normalizeRequestLogStorageConfig(storageCfg)
-	if runSQLiteBootstrap {
-		log.Debugf("usage: running content column migration")
-		migrateContentColumns(db)
-		log.Debugf("usage: running cost column migration")
-		migrateCostColumn(db)
-		log.Debugf("usage: running api_key_name column migration")
-		migrateApiKeyNameColumn(db)
-		log.Debugf("usage: running upstream_model column migration")
-		migrateUpstreamModelColumn(db)
-		log.Debugf("usage: running vision_fallback_model column migration")
-		migrateVisionFallbackModelColumn(db)
-		log.Debugf("usage: running api_key_id column migration")
-		migrateAPIKeyIDColumn(db)
-		log.Debugf("usage: ensuring request log lookup indexes")
-		ensureRequestLogLookupIndexes(db)
-		log.Debugf("usage: running auth_subject_id column migration")
-		migrateAuthSubjectIDColumns(db)
-		log.Debugf("usage: running first_token_ms column migration")
-		migrateFirstTokenColumn(db)
-		log.Debugf("usage: running streaming column migration")
-		migrateStreamingColumn(db)
-		log.Debugf("usage: running request log detail column migration")
-		migrateRequestLogDetailColumn(db)
-		log.Debugf("usage: running request log content session_id column migration")
-		migrateRequestLogContentSessionIDColumn(db)
-		log.Debugf("usage: ensuring request log detail indexes")
-		ensureRequestLogDetailIndexes(db)
-	}
+	log.Debugf("usage: running content column migration")
+	migrateContentColumns(db)
+	log.Debugf("usage: running cost column migration")
+	migrateCostColumn(db)
+	log.Debugf("usage: running api_key_name column migration")
+	migrateApiKeyNameColumn(db)
+	log.Debugf("usage: running upstream_model column migration")
+	migrateUpstreamModelColumn(db)
+	log.Debugf("usage: running vision_fallback_model column migration")
+	migrateVisionFallbackModelColumn(db)
+	log.Debugf("usage: running api_key_id column migration")
+	migrateAPIKeyIDColumn(db)
+	log.Debugf("usage: ensuring request log lookup indexes")
+	ensureRequestLogLookupIndexes(db)
+	log.Debugf("usage: running auth_subject_id column migration")
+	migrateAuthSubjectIDColumns(db)
+	log.Debugf("usage: running first_token_ms column migration")
+	migrateFirstTokenColumn(db)
+	log.Debugf("usage: running streaming column migration")
+	migrateStreamingColumn(db)
+	log.Debugf("usage: running request log detail column migration")
+	migrateRequestLogDetailColumn(db)
+	log.Debugf("usage: running request log content session_id column migration")
+	migrateRequestLogContentSessionIDColumn(db)
+	log.Debugf("usage: ensuring request log detail indexes")
+	ensureRequestLogDetailIndexes(db)
 	log.Debugf("usage: initializing pricing table")
 	initPricingTable(db)
 	log.Debugf("usage: initializing model config tables")
@@ -649,7 +615,7 @@ func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg co
 	startRequestLogMaintenance(db)
 	log.Debugf("usage: scheduling request log content session_id backfill")
 	startRequestLogContentSessionIDBackfill(db)
-	log.Infof("usage: %s database initialised at %s", driver, dbPath)
+	log.Infof("usage: SQLite database initialised at %s", dbPath)
 	return nil
 }
 
@@ -668,8 +634,7 @@ func CloseDB() {
 		usageReadDB = nil
 	}
 	usageLoc = nil
-	usageDriver = ""
-	log.Info("usage: database closed")
+	log.Info("usage: SQLite database closed")
 }
 
 // InsertLog writes a single request log entry into the SQLite database.
@@ -752,50 +717,35 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstr
 		return
 	}
 
-	insertSQL := `INSERT INTO request_logs
-		(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
-		 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	insertArgs := []any{
+	result, err := tx.Exec(
+		`INSERT INTO request_logs
+			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
+			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex,
 		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		log.Errorf("usage: insert log: %v", err)
+		return
 	}
 
 	if requestLogStorage.StoreContent && (inputContent != "" || outputContent != "" || detailContent != "") {
-		var logID int64
-		if usageDriver == "postgres" {
-			if err := tx.QueryRow(insertSQL+" RETURNING id", insertArgs...).Scan(&logID); err != nil {
-				_ = tx.Rollback()
-				log.Errorf("usage: insert log: %v", err)
-				return
-			}
-		} else {
-			result, err := tx.Exec(insertSQL, insertArgs...)
-			if err != nil {
-				_ = tx.Rollback()
-				log.Errorf("usage: insert log: %v", err)
-				return
-			}
-			var errLastID error
-			logID, errLastID = result.LastInsertId()
-			if errLastID != nil {
-				_ = tx.Rollback()
-				log.Errorf("usage: resolve inserted log id: %v", errLastID)
-				return
-			}
+		logID, errLastID := result.LastInsertId()
+		if errLastID != nil {
+			_ = tx.Rollback()
+			log.Errorf("usage: resolve inserted log id: %v", errLastID)
+			return
 		}
 		if errStore := insertLogContentTx(tx, logID, timestamp, inputContent, outputContent, detailContent); errStore != nil {
 			_ = tx.Rollback()
 			log.Errorf("usage: insert log content: %v", errStore)
 			return
 		}
-	} else if _, err := tx.Exec(insertSQL, insertArgs...); err != nil {
-		_ = tx.Rollback()
-		log.Errorf("usage: insert log: %v", err)
-		return
 	}
 
 	if errCommit := tx.Commit(); errCommit != nil {
@@ -841,38 +791,7 @@ func MigrateFromSnapshot(snapshot StatisticsSnapshot) (int64, error) {
 
 // --- internal helpers ---
 
-type storedTime struct {
-	Time  time.Time
-	Valid bool
-}
-
-func (t *storedTime) Scan(value any) error {
-	parsed, ok := parseStoredTimeValue(value)
-	t.Time = parsed
-	t.Valid = ok
-	return nil
-}
-
 func parseStoredTime(value string) (time.Time, bool) {
-	return parseStoredTimeValue(value)
-}
-
-func parseStoredTimeValue(value any) (time.Time, bool) {
-	switch v := value.(type) {
-	case nil:
-		return time.Time{}, false
-	case time.Time:
-		return v.UTC(), true
-	case string:
-		return parseStoredTimeString(v)
-	case []byte:
-		return parseStoredTimeString(string(v))
-	default:
-		return time.Time{}, false
-	}
-}
-
-func parseStoredTimeString(value string) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, false

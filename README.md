@@ -30,8 +30,6 @@
 
 CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible upstream services into one managed API layer. It proxies Claude Code, Gemini CLI, OpenAI Codex, Amp CLI, OpenAI-compatible clients, and other AI coding tools through a unified endpoint, then adds routing groups, failover, request logging, quota control, model pricing, image-generation support, API-key self-service, online updates, `/manage` web hosting, and terminal management workflows around that traffic.
 
-The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. PostgreSQL is the source of truth for runtime data; Redis is used for cache, locks, limits, queues, and rebuildable state. SQLite is legacy-only and is supported as an import source during migration.
-
 ```
 ┌───────────────────────┐         ┌──────────────┐         ┌────────────────────┐
 │   AI Coding Tools     │         │              │         │  Upstream Providers │
@@ -59,17 +57,17 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 | 🧠 **Multimodal Support** | Full support for text + image inputs, image-generation routing, function calling (tools), and streaming SSE responses |
 | 🔗 **OpenAI-Compatible** | Works with any upstream that speaks the OpenAI Chat Completions protocol |
 
-### 📊 Request Logging & Monitoring (PostgreSQL)
+### 📊 Request Logging & Monitoring (SQLite)
 
 | Feature | Description |
 |:--------|:------------|
-| 📝 **Full Request Capture** | Every API request is logged to PostgreSQL with timestamp, model, tokens (in/out/reasoning/cache), latency, status, and source channel |
-| 💬 **Message Body Storage** | Full request/response message content captured in compressed PostgreSQL storage, with separate retention for content vs. metadata |
+| 📝 **Full Request Capture** | Every API request is logged to SQLite with timestamp, model, tokens (in/out/reasoning/cache), latency, status, and source channel |
+| 💬 **Message Body Storage** | Full request/response message content captured in compressed SQLite storage, with separate retention for content vs. metadata |
 | 🔍 **Advanced Querying** | Filter logs by API Key, model, status, time range with efficient pagination (LIMIT/OFFSET) |
 | 📈 **Analytics Aggregation** | Pre-computed dashboards: daily trends, model distribution, hourly heatmaps, per-key statistics |
 | 🏥 **Health Score Engine** | Real-time 0–100 health score considering success rate, latency, active channels, and error patterns |
 | 📡 **WebSocket Monitoring** | Live system stats streamed via WebSocket: CPU, memory, goroutines, network I/O, DB size |
-| 🗄️ **Ent + PostgreSQL** | Uses PostgreSQL 15+ as the runtime primary database with Ent-generated schema metadata |
+| 🗄️ **No-CGO SQLite** | Uses `modernc.org/sqlite` — pure Go, no CGO dependency, easy cross-compilation |
 
 ### 🔐 API Key & Access Management
 
@@ -120,8 +118,8 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 
 | Feature | Description |
 |:--------|:------------|
-| 💾 **PostgreSQL Storage** | Usage data, request logs, message bodies, API keys, routing, proxy pool, model config, and quota state are stored in PostgreSQL |
-| 🔄 **Redis Runtime State** | Redis 7+ handles cache, locks, limits, queues, and rebuildable snapshots; PostgreSQL remains the source of truth |
+| 💾 **SQLite Storage** | All usage data, request logs, and message bodies stored in local SQLite database |
+| 🔄 **Redis Backup** | Optional Redis integration for periodic snapshotting and cross-restart metric preservation |
 | 🗃️ **Pluggable Auth/Config Backends** | Local files by default, with optional PostgreSQL, Git, or S3-compatible object storage backends for config/auth persistence |
 | 📦 **Config Snapshots** | Import/export entire system configuration as JSON for backup and migration |
 
@@ -214,17 +212,19 @@ The gallery below uses the latest supplied screenshots, covering the current end
 
 ### 🐳 Install With Docker Compose
 
-Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` starts CliRelay, PostgreSQL 15, Redis 7, and the updater sidecar. A `.env` file is optional: the `clirelay-init` service creates it on the first `docker compose up -d`, generates missing secrets such as `CLIRELAY_UPDATER_TOKEN` and `CLIRELAY_POSTGRES_PASSWORD`, preserves existing values, and creates `config.yaml` from `config.example.yaml` if it is missing. For production, pre-create `.env` only when you want to pin your own secrets or bind paths.
+Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` uses the published `ghcr.io/kittors/clirelay:latest` image by default and starts both the API service and updater sidecar.
 
 ```bash
 git clone https://github.com/kittors/CliRelay.git
 cd CliRelay
+cp config.example.yaml config.yaml
+mkdir -p auths logs data
 # Linux bind mounts need write access for the non-root container user:
 # sudo chown -R 10001:10001 auths logs data
 docker compose up -d
 ```
 
-After the first start, edit the generated `config.yaml` to add your API keys or OAuth credentials, then restart the service:
+Edit `config.yaml` to add your API keys or OAuth credentials, then restart the service:
 
 ```bash
 docker compose restart cli-proxy-api
@@ -260,19 +260,12 @@ auto-update:
   channel: dev
 ```
 
-### 🗄️ Runtime Data Stack
+### 🗄️ Enabling Data Persistence
 
-CliRelay uses PostgreSQL 15+ as the runtime primary database through Ent ORM. Redis 7+ is intentionally limited to cache, locks, limits, queues, and rebuildable snapshots. The bundled Docker Compose file starts both services and injects container-local connection settings automatically through the generated `.env`.
-
-For old Docker deployments that still have a SQLite-only compose file, update from `/manage/system` can upgrade `docker-compose.yml` and `.env` before it restarts the application container. The updater adds the `clirelay-init`, `clirelay-migrate`, PostgreSQL, Redis, and updater services, keeps the existing application service running, starts PostgreSQL/Redis, streams the SQLite migration progress, and only recreates the application container after migration succeeds. SQLite is left in place.
-
-If the updater cannot write the deployment files because the old container was mounted without access to the project directory, replace `docker-compose.yml` with the latest one from this repository and run `docker compose up -d` once. After that, future online updates can update the compose file automatically.
-
-For non-Compose deployments:
-1. Provision PostgreSQL 15+ and Redis 7+.
-2. Set `postgres.dsn` and `redis.*` in `config.yaml`, or override them with `CLIRELAY_POSTGRES_DSN`, `CLIRELAY_REDIS_ENABLE`, `CLIRELAY_REDIS_ADDR`, `CLIRELAY_REDIS_PASSWORD`, and `CLIRELAY_REDIS_DB`.
-3. Run `./cli-proxy-api -sqlite-dry-run /path/to/usage.db` before migration to collect a read-only table inventory with row counts, ID/time ranges, and checksums. The command does not print row contents.
-4. Run `./cli-proxy-api -sqlite-import /path/to/usage.db` with `CLIRELAY_POSTGRES_DSN` set to verify source/target rows and checksums without writing. Apply with `-sqlite-import-dry-run=false` only after reviewing the report.
+By default, API usage logs are stored in SQLite for persistence. For additional backup:
+1. Ensure you have a Redis server running.
+2. Edit `config.yaml` and set `redis.enable: true` with your Redis address.
+CliRelay will automatically snapshot and restore traffic metrics on every startup!
 
 For large installations, tune `request-log-storage` in `config.yaml` to control how full request/response bodies are retained. By default, full bodies are compressed, kept for 30 days, and capped at ~1GB (1024MB); lightweight request metadata remains queryable for longer-term statistics. Set `content-retention-days: 0` to keep full content indefinitely, set `store-content: false` to stop new body storage without deleting existing historical content, and adjust `max-total-size-mb` to cap body storage so the oldest full bodies are pruned before the retention window is reached.
 
@@ -319,7 +312,7 @@ CliRelay/
 ├── internal/config/          # Config parsing, defaults, migrations
 ├── internal/store/           # Local, Git, PostgreSQL, object-store auth/config persistence
 ├── internal/tui/             # Terminal management UI
-├── internal/usage/           # PostgreSQL-backed usage data, retention, analytics
+├── internal/usage/           # SQLite usage DB, retention, analytics
 ├── internal/managementasset/ # /manage panel hosting and asset sync
 ├── sdk/                      # Reusable Go SDK, handlers, executors
 ├── auths/                    # Local credential storage
@@ -339,7 +332,6 @@ CliRelay/
 | [SDK Advanced](docs/sdk-advanced.md) | Executors & translators deep-dive |
 | [SDK Access](docs/sdk-access.md) | Authentication in SDK context |
 | [SDK Watcher](docs/sdk-watcher.md) | Credential loading & hot-reload |
-| [PostgreSQL / Redis Migration](docs/postgres-redis-migration.md) | Runtime data-stack setup, SQLite dry-run inventory, and validation |
 
 ## 🤝 Contributing
 
@@ -374,6 +366,6 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 This project is a deeply enhanced fork built upon the excellent core logic of the open-source **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** project.
 We want to express our deepest gratitude to the original **CLIProxyAPI** project and all its contributors!
 
-It is thanks to the solid, innovative proxy distribution foundation built by the upstream that we were able to stand on the shoulders of giants. This allowed us to develop unique advanced management features (like API Key tracking & control, full request logging, and real-time system monitoring) and rebuild an entirely new frontend dashboard from scratch.
+It is thanks to the solid, innovative proxy distribution foundation built by the upstream that we were able to stand on the shoulders of giants. This allowed us to develop unique advanced management features (like API Key tracking & control, full request logging with SQLite, and real-time system monitoring) and rebuild an entirely new frontend dashboard from scratch.
 
 A huge salute to the spirit of open source! ❤️

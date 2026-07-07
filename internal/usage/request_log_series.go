@@ -74,7 +74,7 @@ func QueryPublicChartData(apiKey string, days int) (PublicChartData, error) {
 	rows, err := db.Query(`SELECT
 	             date(timestamp, 'localtime') as d,
 	             model,
-	             CASE WHEN failed != 0 THEN 1 ELSE 0 END as failed_flag,
+	             CASE WHEN failed = 1 OR failed = 'true' THEN 1 ELSE 0 END as failed_flag,
 	             input_tokens,
 	             output_tokens,
 	             total_tokens,
@@ -251,7 +251,7 @@ func QueryDailySeries(apiKey string, days int) ([]DailySeriesPoint, error) {
 	// (configured via TZ/time.Local) for correct day bucketing.
 	q := `SELECT date(timestamp, 'localtime') as d,
 	             COUNT(*) as reqs,
-	             SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END) as failed_reqs,
+	             SUM(CASE WHEN failed = 1 OR failed = 'true' THEN 1 ELSE 0 END) as failed_reqs,
 	             COALESCE(SUM(input_tokens),0),
 	             COALESCE(SUM(output_tokens),0)
 	      FROM request_logs` + where + `

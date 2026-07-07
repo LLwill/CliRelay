@@ -211,38 +211,6 @@ func TestLoadConfigAllowsPortEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAllowsDataStackEnvOverrides(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte(`
-postgres:
-  dsn: postgres://old/cliproxy
-redis:
-  enable: false
-  addr: 127.0.0.1:6379
-  password: old
-  db: 0
-`), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv(EnvPostgresDSN, "postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable")
-	t.Setenv(EnvRedisEnable, "true")
-	t.Setenv(EnvRedisAddr, "redis:6379")
-	t.Setenv(EnvRedisPassword, "secret")
-	t.Setenv(EnvRedisDB, "2")
-
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig returned error: %v", err)
-	}
-
-	if cfg.Postgres.DSN != "postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable" {
-		t.Fatalf("Postgres.DSN = %q", cfg.Postgres.DSN)
-	}
-	if !cfg.Redis.Enable || cfg.Redis.Addr != "redis:6379" || cfg.Redis.Password != "secret" || cfg.Redis.DB != 2 {
-		t.Fatalf("Redis override = %+v", cfg.Redis)
-	}
-}
-
 func TestLoadConfigDefaultsAutoUpdateEnabled(t *testing.T) {
 	t.Parallel()
 

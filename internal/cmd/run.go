@@ -6,7 +6,9 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,10 +31,42 @@ import (
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
 	loc := config.ApplyTimeZone(cfg.Timezone)
-	if err := initializeRuntimeDataStack(cfg, configPath, loc); err != nil {
-		log.Errorf("usage: failed to initialize runtime data stack: %v", err)
-		return
+	dataDir := filepath.Join(filepath.Dir(configPath), "data")
+	_ = os.MkdirAll(dataDir, 0755)
+	dbPath := filepath.Join(dataDir, "usage.db")
+
+	// Migrate legacy usage.db from config directory to data/ subdirectory.
+	if oldPath := filepath.Join(filepath.Dir(configPath), "usage.db"); oldPath != dbPath {
+		if _, err := os.Stat(oldPath); err == nil {
+			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+				if err := os.Rename(oldPath, dbPath); err != nil {
+					log.Warnf("usage: failed to migrate %s → %s: %v", oldPath, dbPath, err)
+				} else {
+					log.Infof("usage: migrated database from %s → %s", oldPath, dbPath)
+					// Also move WAL and SHM files if they exist.
+					for _, suffix := range []string{"-wal", "-shm"} {
+						if err := os.Rename(oldPath+suffix, dbPath+suffix); err != nil && !os.IsNotExist(err) {
+							log.Warnf("usage: failed to migrate %s: %v", oldPath+suffix, err)
+						}
+					}
+				}
+			}
+		}
 	}
+
+	if err := usage.InitDB(dbPath, cfg.RequestLogStorage, loc); err != nil {
+		log.Errorf("usage: failed to initialize SQLite: %v", err)
+	}
+	usage.MigrateAPIKeysFromConfig(cfg, configPath)
+	usage.MigrateAPIKeyPermissionProfilesFromYAML(configPath)
+	usage.MigrateRoutingConfigFromConfig(cfg, configPath)
+	usage.ApplyStoredRoutingConfig(cfg)
+	usage.MigrateProxyPoolFromConfig(cfg, configPath)
+	usage.ApplyStoredProxyPool(cfg)
+	settingsstore.MigrateRuntimeSettingsFromConfig(cfg, configPath)
+	settingsstore.ApplyStoredRuntimeSettings(cfg)
+	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey, usage.QueryTodayCostByKey)
+	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
 	usage.InitRedis(cfg.Redis)
 	defer usage.StopRedis()
 
@@ -70,12 +104,41 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 // and returns a cancel function for shutdown and a done channel.
 func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
 	loc := config.ApplyTimeZone(cfg.Timezone)
-	if err := initializeRuntimeDataStack(cfg, configPath, loc); err != nil {
-		log.Errorf("usage: failed to initialize runtime data stack: %v", err)
-		doneCh := make(chan struct{})
-		close(doneCh)
-		return func() {}, doneCh
+	dataDir := filepath.Join(filepath.Dir(configPath), "data")
+	_ = os.MkdirAll(dataDir, 0755)
+	dbPath := filepath.Join(dataDir, "usage.db")
+
+	// Migrate legacy usage.db from config directory to data/ subdirectory.
+	if oldPath := filepath.Join(filepath.Dir(configPath), "usage.db"); oldPath != dbPath {
+		if _, err := os.Stat(oldPath); err == nil {
+			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+				if err := os.Rename(oldPath, dbPath); err != nil {
+					log.Warnf("usage: failed to migrate %s → %s: %v", oldPath, dbPath, err)
+				} else {
+					log.Infof("usage: migrated database from %s → %s", oldPath, dbPath)
+					for _, suffix := range []string{"-wal", "-shm"} {
+						if err := os.Rename(oldPath+suffix, dbPath+suffix); err != nil && !os.IsNotExist(err) {
+							log.Warnf("usage: failed to migrate %s: %v", oldPath+suffix, err)
+						}
+					}
+				}
+			}
+		}
 	}
+
+	if err := usage.InitDB(dbPath, cfg.RequestLogStorage, loc); err != nil {
+		log.Errorf("usage: failed to initialize SQLite: %v", err)
+	}
+	usage.MigrateAPIKeysFromConfig(cfg, configPath)
+	usage.MigrateAPIKeyPermissionProfilesFromYAML(configPath)
+	usage.MigrateRoutingConfigFromConfig(cfg, configPath)
+	usage.ApplyStoredRoutingConfig(cfg)
+	usage.MigrateProxyPoolFromConfig(cfg, configPath)
+	usage.ApplyStoredProxyPool(cfg)
+	settingsstore.MigrateRuntimeSettingsFromConfig(cfg, configPath)
+	settingsstore.ApplyStoredRuntimeSettings(cfg)
+	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey, usage.QueryTodayCostByKey)
+	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
 	usage.InitRedis(cfg.Redis)
 
 	builder := cliproxy.NewBuilder().
@@ -89,7 +152,6 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
-		usage.StopRedis()
 		close(doneCh)
 		return cancelFn, doneCh
 	}
@@ -103,26 +165,6 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	}()
 
 	return cancelFn, doneCh
-}
-
-func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time.Location) error {
-	if cfg == nil {
-		return errors.New("config is nil")
-	}
-	if err := usage.InitPostgres(cfg.Postgres, cfg.RequestLogStorage, loc); err != nil {
-		return err
-	}
-	usage.MigrateAPIKeysFromConfig(cfg, configPath)
-	usage.MigrateAPIKeyPermissionProfilesFromYAML(configPath)
-	usage.MigrateRoutingConfigFromConfig(cfg, configPath)
-	usage.ApplyStoredRoutingConfig(cfg)
-	usage.MigrateProxyPoolFromConfig(cfg, configPath)
-	usage.ApplyStoredProxyPool(cfg)
-	settingsstore.MigrateRuntimeSettingsFromConfig(cfg, configPath)
-	settingsstore.ApplyStoredRuntimeSettings(cfg)
-	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey, usage.QueryTodayCostByKey)
-	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
-	return nil
 }
 
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode

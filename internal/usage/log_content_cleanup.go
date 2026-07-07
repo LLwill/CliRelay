@@ -249,12 +249,6 @@ func compactLogContentStorageInternal(db *sql.DB, allowOptimize bool) {
 	if db == nil {
 		return
 	}
-	if usageDriver == "postgres" {
-		if err := compactPostgresLogStorage(db); err != nil {
-			log.Warnf("usage: postgres log storage compact skipped: %v", err)
-		}
-		return
-	}
 
 	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		log.Warnf("usage: wal checkpoint failed: %v", err)
@@ -292,11 +286,4 @@ func compactLogContentStorageInternal(db *sql.DB, allowOptimize bool) {
 	if walBytes := walBytesOnDisk(); walBytes > 0 && walBytes >= (64<<20) {
 		log.Warnf("usage: sqlite WAL remains large after checkpoint (%d bytes at %s); consider lowering cleanup-interval-minutes or checking long-lived transactions", walBytes, usageWALPath())
 	}
-}
-
-func compactPostgresLogStorage(db *sql.DB) error {
-	if db == nil {
-		return nil
-	}
-	return nil
 }

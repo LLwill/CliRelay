@@ -233,7 +233,7 @@ func queryRecentCodexFingerprintDetailRows(db *sql.DB, params CodexFingerprintRe
 	for rows.Next() {
 		var (
 			row         codexFingerprintDetailRow
-			timestamp   storedTime
+			timestamp   string
 			failedInt   int
 			compression string
 			compressed  []byte
@@ -251,8 +251,8 @@ func queryRecentCodexFingerprintDetailRows(db *sql.DB, params CodexFingerprintRe
 		); err != nil {
 			return nil, fmt.Errorf("usage: scan codex fingerprint detail row: %w", err)
 		}
-		if timestamp.Valid {
-			row.timestamp = timestamp.Time
+		if parsed, ok := parseStoredTime(timestamp); ok {
+			row.timestamp = parsed
 		}
 		row.failed = failedInt != 0
 		detail, err := decompressLogContent(compression, compressed)

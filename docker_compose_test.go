@@ -40,32 +40,19 @@ func TestRepositoryComposePassesContainerAuthPath(t *testing.T) {
 	}
 }
 
-func TestRepositoryComposeGeneratesUpdaterTokenThroughInit(t *testing.T) {
+func TestRepositoryComposeRequiresUpdaterToken(t *testing.T) {
 	data, err := os.ReadFile("docker-compose.yml")
 	if err != nil {
 		t.Fatalf("read docker-compose.yml: %v", err)
 	}
 	content := string(data)
 
-	for _, want := range []string{
-		"clirelay-init:",
-		"command: [\"clirelay-init-env\"]",
-		"CLIRELAY_ENV_FILE: /clirelay-deploy/.env",
-		"condition: service_completed_successfully",
-		". /clirelay-deploy/.env",
-	} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("docker-compose.yml missing init env text %q", want)
-		}
+	want := "CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:?CLIRELAY_UPDATER_TOKEN is required for updater sidecar}"
+	if got := strings.Count(content, want); got != 2 {
+		t.Fatalf("docker-compose.yml has %d required updater token entries, want 2", got)
 	}
-	for _, forbidden := range []string{
-		"CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:-clirelay-local-updater}",
-		"CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:?",
-		"POSTGRES_PASSWORD: ${CLIRELAY_POSTGRES_PASSWORD:-cliproxy}",
-	} {
-		if strings.Contains(content, forbidden) {
-			t.Fatalf("docker-compose.yml still contains generated secret fallback %q", forbidden)
-		}
+	if strings.Contains(content, "CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:-}") {
+		t.Fatal("docker-compose.yml still allows an empty updater token")
 	}
 }
 

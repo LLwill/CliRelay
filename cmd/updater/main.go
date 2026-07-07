@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,13 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -80,8 +75,6 @@ type updateStatusResponse struct {
 	Status          string           `json:"status"`
 	Stage           string           `json:"stage"`
 	Message         string           `json:"message,omitempty"`
-	ProgressPercent float64          `json:"progress_percent,omitempty"`
-	Migration       *migrationStatus `json:"migration,omitempty"`
 	Service         string           `json:"service,omitempty"`
 	TargetImage     string           `json:"target_image,omitempty"`
 	TargetTag       string           `json:"target_tag,omitempty"`
@@ -105,13 +98,6 @@ type updateRequest struct {
 	UIVersion string `json:"ui_version"`
 	UICommit  string `json:"ui_commit"`
 	Channel   string `json:"channel"`
-}
-
-type dockerMount struct {
-	Type        string `json:"Type"`
-	Source      string `json:"Source"`
-	Destination string `json:"Destination"`
-	RW          bool   `json:"RW"`
 }
 
 func main() {
@@ -265,12 +251,7 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envFile := s.envFile
-	if strings.TrimSpace(envFile) == "" && strings.TrimSpace(s.composeFile) != "" {
-		envFile = filepath.Join(filepath.Dir(s.composeFile), ".env")
-	}
-	previousImage := configuredImageInFile(envFile)
-	if err := persistRequestedImage(s.context(), envFile, req.Image, req.Tag); err != nil {
+	if err := persistRequestedImage(s.envFile, req.Image, req.Tag); err != nil {
 		if errors.Is(err, errRequestedImageNotAllowed) {
 			message := err.Error()
 			log.Print(message)
@@ -291,14 +272,12 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		reporter := updaterRunReporter{server: s, runID: runID}
 		if err := s.runner(ctx, s.composeFile, s.envFile, s.projectName, service, reporter); err != nil {
-			err = restoreRequestedImage(ctx, envFile, previousImage, reporter, err)
 			log.Printf("compose update failed: %v", err)
 			reporter.Stage("failed", err.Error())
 			s.finishUpdate(runID, "failed", "failed", err.Error())
 			return
 		}
 		if message, skipped := s.pullSkipFailure(runID); skipped {
-			message = restoreRequestedImage(ctx, envFile, previousImage, reporter, errors.New(message)).Error()
 			reporter.Stage("failed", message)
 			s.finishUpdate(runID, "failed", "failed", message)
 			return
@@ -317,7 +296,7 @@ func (s *updaterServer) context() context.Context {
 	return s.ctx
 }
 
-func persistRequestedImage(ctx context.Context, envFile string, image string, tag string) error {
+func persistRequestedImage(envFile string, image string, tag string) error {
 	imageRef := requestedImageRef(image, tag)
 	if imageRef == "" {
 		if strings.TrimSpace(image) == "" && strings.TrimSpace(tag) == "" {
@@ -331,7 +310,7 @@ func persistRequestedImage(ctx context.Context, envFile string, image string, ta
 
 	data, err := os.ReadFile(envFile)
 	if os.IsNotExist(err) {
-		return writeDeploymentFile(ctx, envFile, []byte("CLI_PROXY_IMAGE="+imageRef+"\n"), 0o600, updaterRunReporter{})
+		return fmt.Errorf("%w: missing configured CLI_PROXY_IMAGE", errRequestedImageNotAllowed)
 	}
 	if err != nil {
 		return err
@@ -341,8 +320,7 @@ func persistRequestedImage(ctx context.Context, envFile string, image string, ta
 	configuredRepo := imageRepository(configuredImageRef(lines))
 	requestedRepo := imageRepository(imageRef)
 	if configuredRepo == "" {
-		lines = append(lines, "CLI_PROXY_IMAGE="+imageRef)
-		return writeDeploymentFile(ctx, envFile, []byte(strings.Join(lines, "\n")+"\n"), 0o600, updaterRunReporter{})
+		return fmt.Errorf("%w: missing configured CLI_PROXY_IMAGE", errRequestedImageNotAllowed)
 	}
 	if requestedRepo != configuredRepo {
 		return fmt.Errorf("%w: %s does not match %s", errRequestedImageNotAllowed, requestedRepo, configuredRepo)
@@ -361,7 +339,7 @@ func persistRequestedImage(ctx context.Context, envFile string, image string, ta
 		lines = append(lines, line)
 	}
 	content := strings.Join(lines, "\n") + "\n"
-	return writeDeploymentFile(ctx, envFile, []byte(content), 0o600, updaterRunReporter{})
+	return os.WriteFile(envFile, []byte(content), 0o600)
 }
 
 func configuredImageRef(lines []string) string {
@@ -448,7 +426,6 @@ func (s *updaterServer) startUpdate(service string, req updateRequest) uint64 {
 		Status:          "running",
 		Stage:           "preparing",
 		Message:         "preparing update",
-		ProgressPercent: 5,
 		Service:         service,
 		TargetImage:     strings.TrimSpace(req.Image),
 		TargetTag:       strings.TrimSpace(req.Tag),
@@ -473,7 +450,6 @@ func (s *updaterServer) setStatus(status string, message string) {
 	s.status.Status = strings.TrimSpace(status)
 	s.status.Stage = strings.TrimSpace(status)
 	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(status)
 	s.status.UpdatedAt = now
 	if status == "failed" || status == "completed" {
 		s.status.FinishedAt = now
@@ -497,7 +473,6 @@ func (s *updaterServer) appendLog(runID uint64, stream string, message string) {
 		}
 	}
 	s.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.updateProgressFromLog(trimmed)
 	s.status.Logs = append(s.status.Logs, updateLogEntry{
 		Timestamp: s.status.UpdatedAt,
 		Stream:    strings.TrimSpace(stream),
@@ -516,8 +491,6 @@ func (s *updaterServer) updateStage(runID uint64, stage string, message string) 
 	}
 	s.status.Stage = strings.TrimSpace(stage)
 	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(stage)
-	s.updateProgressFromStage(stage, message)
 	s.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 }
 
@@ -531,7 +504,6 @@ func (s *updaterServer) finishUpdate(runID uint64, status string, stage string, 
 	s.status.Status = strings.TrimSpace(status)
 	s.status.Stage = strings.TrimSpace(stage)
 	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(stage)
 	s.status.UpdatedAt = now
 	s.status.FinishedAt = now
 }
@@ -540,14 +512,23 @@ func (s *updaterServer) snapshot() updateStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := s.status
-	if s.status.Migration != nil {
-		migration := *s.status.Migration
-		snapshot.Migration = &migration
-	}
 	if len(s.status.Logs) > 0 {
 		snapshot.Logs = append([]updateLogEntry(nil), s.status.Logs...)
 	}
 	return snapshot
+}
+
+func (s *updaterServer) pullSkipFailure(runID uint64) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID != s.runID || !s.pullSkipped {
+		return "", false
+	}
+	message := "docker compose pull skipped the target service; check pull policy and image refresh settings"
+	if strings.TrimSpace(s.pullSkipLog) != "" {
+		message += ": " + strings.TrimSpace(s.pullSkipLog)
+	}
+	return message, true
 }
 
 type updaterRunReporter struct {
@@ -570,541 +551,16 @@ func (r updaterRunReporter) Log(stream string, message string) {
 }
 
 func runComposeUpdate(ctx context.Context, composeFile string, envFile string, projectName string, service string, reporter updateReporter) error {
-	preparedEnvFile, err := ensureRuntimeDataStackConfig(ctx, composeFile, envFile, service, reporter)
-	if err != nil {
-		return err
-	}
-	envFile = preparedEnvFile
 	reporter.Stage("pulling", "pulling target image")
 	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "pull", service); err != nil {
 		return err
 	}
-	if composeFileHasService(composeFile, "clirelay-migrate") {
-		reporter.Stage("migrating", "starting PostgreSQL/Redis before data migration check")
-		if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "postgres", "redis"); err != nil {
-			return err
-		}
-		reporter.Stage("migrating", "checking runtime data migration before service restart")
-		if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "run", "--rm", "clirelay-migrate"); err != nil {
-			return err
-		}
-		reporter.Stage("migrating", "runtime data migration check finished before service restart")
-	}
-	reporter.Stage("restarting", "recreating service container without restarting dependencies")
-	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "--no-deps", "--remove-orphans", service); err != nil {
+	reporter.Stage("restarting", "restarting service container")
+	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "--remove-orphans", service); err != nil {
 		return err
 	}
 	reporter.Stage("verifying", "docker update commands completed")
 	return nil
-}
-
-func ensureRuntimeDataStackConfig(ctx context.Context, composeFile string, envFile string, service string, reporter updateReporter) (string, error) {
-	composeData, err := os.ReadFile(composeFile)
-	if strings.TrimSpace(composeFile) == "" || os.IsNotExist(err) {
-		return envFile, nil
-	}
-	if err != nil {
-		return envFile, fmt.Errorf("read docker compose file: %w", err)
-	}
-	if strings.TrimSpace(envFile) == "" {
-		envFile = filepath.Join(filepath.Dir(composeFile), ".env")
-	}
-	projectDir := deploymentProjectDir(ctx, composeFile)
-	composeText := string(composeData)
-	if hasComposeService(composeText, "postgres") && hasComposeService(composeText, "redis") && hasComposeService(composeText, "clirelay-init") && hasComposeService(composeText, "clirelay-migrate") {
-		if err := ensureRuntimeEnvFile(ctx, envFile, projectDir, service, composeAppImage(composeText, service), reporter); err != nil {
-			return envFile, err
-		}
-		return envFile, nil
-	}
-
-	reporter.Stage("preparing", "upgrading docker compose runtime data stack")
-	nextCompose, appImage, err := upgradeComposeRuntimeStack(composeText, projectDir, service)
-	if err != nil {
-		return envFile, err
-	}
-	if err := ensureRuntimeEnvFile(ctx, envFile, projectDir, service, appImage, reporter); err != nil {
-		return envFile, err
-	}
-	if err := writeDeploymentFile(ctx, composeFile, []byte(nextCompose), 0o644, reporter); err != nil {
-		return envFile, fmt.Errorf("upgrade docker-compose.yml for PostgreSQL/Redis runtime stack: %w", err)
-	}
-	reporter.Log("stdout", "docker-compose.yml upgraded with PostgreSQL/Redis runtime services")
-	return envFile, nil
-}
-
-func upgradeComposeRuntimeStack(composeText string, projectDir string, service string) (string, string, error) {
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(composeText), &doc); err != nil {
-		return "", "", fmt.Errorf("parse docker compose file: %w", err)
-	}
-	services, ok := stringMap(doc["services"])
-	if !ok {
-		return "", "", fmt.Errorf("docker compose file has no services section")
-	}
-	targetName := strings.TrimSpace(service)
-	if _, ok := services[targetName]; !ok {
-		targetName = firstApplicationService(services)
-	}
-	if targetName == "" {
-		return "", "", fmt.Errorf("docker compose file has no CliRelay service to upgrade")
-	}
-	target, ok := stringMap(services[targetName])
-	if !ok {
-		target = map[string]any{}
-		services[targetName] = target
-	}
-	appImage := imageFallback(stringValue(target["image"]))
-	if appImage == "" {
-		appImage = "ghcr.io/kittors/clirelay:latest"
-	}
-	target["image"] = "${CLI_PROXY_IMAGE:-" + appImage + "}"
-	target["entrypoint"] = sourceEnvEntrypoint()
-	if !hasComposeCommand(target["command"]) {
-		target["command"] = []any{"./CLIProxyAPI"}
-	}
-	targetEnv := withoutEnvKeys(target["environment"], runtimeStackEnvKeys()...)
-	targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"] = "false"
-	target["environment"] = targetEnv
-	target["volumes"] = appendVolume(target["volumes"], "${CLIRELAY_PROJECT_DIR:-"+projectDir+"}:/clirelay-deploy")
-	targetNetworks := target["networks"]
-	target["depends_on"] = map[string]any{
-		"clirelay-init":    map[string]any{"condition": "service_completed_successfully"},
-		"clirelay-migrate": map[string]any{"condition": "service_completed_successfully"},
-		"postgres":         map[string]any{"condition": "service_healthy"},
-		"redis":            map[string]any{"condition": "service_healthy"},
-	}
-	services["clirelay-init"] = initComposeService(projectDir, targetName, appImage)
-	services["clirelay-migrate"] = migrateComposeService(target, appImage)
-	services["postgres"] = postgresComposeService()
-	services["redis"] = redisComposeService()
-	services["clirelay-updater"] = updaterComposeService(projectDir, targetName, appImage)
-	if targetNetworks != nil {
-		for _, name := range []string{"clirelay-init", "clirelay-migrate", "postgres", "redis", "clirelay-updater"} {
-			if generated, ok := stringMap(services[name]); ok {
-				generated["networks"] = targetNetworks
-			}
-		}
-	}
-
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return "", "", fmt.Errorf("render upgraded docker compose file: %w", err)
-	}
-	return string(out), appImage, nil
-}
-
-func composeAppImage(composeText string, service string) string {
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(composeText), &doc); err != nil {
-		return "ghcr.io/kittors/clirelay:latest"
-	}
-	services, ok := stringMap(doc["services"])
-	if !ok {
-		return "ghcr.io/kittors/clirelay:latest"
-	}
-	targetName := strings.TrimSpace(service)
-	if _, ok := services[targetName]; !ok {
-		targetName = firstApplicationService(services)
-	}
-	if target, ok := stringMap(services[targetName]); ok {
-		if image := stringValue(target["image"]); image != "" {
-			return imageFallback(image)
-		}
-	}
-	return "ghcr.io/kittors/clirelay:latest"
-}
-
-func firstApplicationService(services map[string]any) string {
-	for name := range services {
-		if name != "postgres" && name != "redis" && name != "clirelay-init" && !strings.Contains(name, "updater") {
-			return name
-		}
-	}
-	return ""
-}
-
-func initComposeService(projectDir string, targetService string, image string) map[string]any {
-	return map[string]any{
-		"image":   "${CLI_PROXY_IMAGE:-" + image + "}",
-		"command": []any{"clirelay-init-env"},
-		"environment": map[string]any{
-			"CLI_PROXY_IMAGE":               "${CLI_PROXY_IMAGE:-" + image + "}",
-			"CLIRELAY_PROJECT_DIR":          "${CLIRELAY_PROJECT_DIR:-" + projectDir + "}",
-			"CLIRELAY_ENV_FILE":             "/clirelay-deploy/.env",
-			"CLIRELAY_COMPOSE_PROJECT_NAME": "${CLIRELAY_COMPOSE_PROJECT_NAME:-" + filepath.Base(projectDir) + "}",
-			"CLIRELAY_TARGET_SERVICE":       "${CLIRELAY_TARGET_SERVICE:-" + targetService + "}",
-		},
-		"volumes":     []any{"${CLIRELAY_PROJECT_DIR:-" + projectDir + "}:/clirelay-deploy"},
-		"healthcheck": map[string]any{"disable": true},
-		"restart":     "no",
-	}
-}
-
-func postgresComposeService() map[string]any {
-	return map[string]any{
-		"image":      "postgres:15-alpine",
-		"entrypoint": []any{"sh", "-c", "set -a; . /clirelay-deploy/.env; set +a; export POSTGRES_DB=\"$$CLIRELAY_POSTGRES_DB\" POSTGRES_USER=\"$$CLIRELAY_POSTGRES_USER\" POSTGRES_PASSWORD=\"$$CLIRELAY_POSTGRES_PASSWORD\"; exec docker-entrypoint.sh postgres"},
-		"volumes": []any{
-			"${CLIRELAY_POSTGRES_DATA_PATH:-${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/postgres-data}:/var/lib/postgresql/data",
-			"${CLIRELAY_PROJECT_DIR:-${PWD:-.}}:/clirelay-deploy",
-		},
-		"healthcheck": map[string]any{
-			"test":     []any{"CMD-SHELL", ". /clirelay-deploy/.env; pg_isready -U \"$$CLIRELAY_POSTGRES_USER\" -d \"$$CLIRELAY_POSTGRES_DB\""},
-			"interval": "5s",
-			"timeout":  "5s",
-			"retries":  20,
-		},
-		"depends_on": map[string]any{
-			"clirelay-init": map[string]any{"condition": "service_completed_successfully"},
-		},
-		"restart": "unless-stopped",
-	}
-}
-
-func redisComposeService() map[string]any {
-	return map[string]any{
-		"image":   "redis:7-alpine",
-		"command": []any{"redis-server", "--appendonly", "yes"},
-		"volumes": []any{"${CLIRELAY_REDIS_DATA_PATH:-${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/redis-data}:/data"},
-		"healthcheck": map[string]any{
-			"test":     []any{"CMD", "redis-cli", "ping"},
-			"interval": "5s",
-			"timeout":  "5s",
-			"retries":  20,
-		},
-		"depends_on": map[string]any{
-			"clirelay-init": map[string]any{"condition": "service_completed_successfully"},
-		},
-		"restart": "unless-stopped",
-	}
-}
-
-func updaterComposeService(projectDir string, targetService string, image string) map[string]any {
-	return map[string]any{
-		"image":      "${CLI_PROXY_IMAGE:-" + image + "}",
-		"command":    []any{"./clirelay-updater"},
-		"entrypoint": []any{"sh", "-c", "set -a; . /clirelay-deploy/.env; set +a; exec docker-entrypoint.sh ./clirelay-updater"},
-		"user":       "0:0",
-		"environment": map[string]any{
-			"CLIRELAY_PROJECT_DIR":          "${CLIRELAY_PROJECT_DIR:-" + projectDir + "}",
-			"CLIRELAY_COMPOSE_FILE":         "${CLIRELAY_PROJECT_DIR:-" + projectDir + "}/docker-compose.yml",
-			"CLIRELAY_ENV_FILE":             "${CLIRELAY_ENV_FILE:-${CLIRELAY_PROJECT_DIR:-" + projectDir + "}/.env}",
-			"CLIRELAY_COMPOSE_PROJECT_NAME": "${CLIRELAY_COMPOSE_PROJECT_NAME:-}",
-			"CLIRELAY_TARGET_SERVICE":       "${CLIRELAY_TARGET_SERVICE:-" + targetService + "}",
-		},
-		"volumes": []any{
-			"/var/run/docker.sock:/var/run/docker.sock",
-			"${CLIRELAY_PROJECT_DIR:-" + projectDir + "}:${CLIRELAY_PROJECT_DIR:-" + projectDir + "}",
-			"${CLIRELAY_PROJECT_DIR:-" + projectDir + "}:/clirelay-deploy",
-		},
-		"depends_on": map[string]any{
-			"clirelay-init": map[string]any{"condition": "service_completed_successfully"},
-		},
-		"healthcheck": map[string]any{"disable": true},
-		"restart":     "unless-stopped",
-	}
-}
-
-func sourceEnvEntrypoint() []any {
-	return []any{"sh", "-c", "set -a; . /clirelay-deploy/.env; set +a; exec docker-entrypoint.sh \"$@\"", "--"}
-}
-
-func hasComposeCommand(value any) bool {
-	if strings.TrimSpace(stringValue(value)) != "" {
-		return true
-	}
-	if items, ok := value.([]any); ok {
-		return len(items) > 0
-	}
-	if items, ok := value.([]string); ok {
-		return len(items) > 0
-	}
-	return false
-}
-
-func deploymentProjectDir(ctx context.Context, composeFile string) string {
-	projectDir := filepath.Dir(composeFile)
-	if !strings.HasPrefix(filepath.Clean(composeFile), "/workspace"+string(os.PathSeparator)) {
-		return projectDir
-	}
-	if hostDir, ok := hostProjectDirForMountedPath(ctx, composeFile); ok {
-		return hostDir
-	}
-	return projectDir
-}
-
-func hostProjectDirForMountedPath(ctx context.Context, path string) (string, bool) {
-	containerID, err := os.Hostname()
-	if err != nil || strings.TrimSpace(containerID) == "" {
-		return "", false
-	}
-	mountsJSON, err := dockerInspect(ctx, containerID, "{{json .Mounts}}")
-	if err != nil {
-		return "", false
-	}
-	var mounts []dockerMount
-	if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
-		return "", false
-	}
-	return projectDirFromMounts(path, mounts)
-}
-
-func projectDirFromMounts(path string, mounts []dockerMount) (string, bool) {
-	source, rel, dirMount, ok := hostPathForMountedPath(path, mounts)
-	if !ok {
-		return "", false
-	}
-	if !dirMount {
-		return filepath.Dir(source), true
-	}
-	return filepath.Dir(filepath.Join(source, rel)), true
-}
-
-func runtimeStackEnvKeys() []string {
-	return []string{
-		"CLIRELAY_POSTGRES_DSN",
-		"CLIRELAY_REDIS_ENABLE",
-		"CLIRELAY_REDIS_ADDR",
-		"CLIRELAY_REDIS_PASSWORD",
-		"CLIRELAY_REDIS_DB",
-		"CLIRELAY_TARGET_SERVICE",
-		"CLIRELAY_UPDATER_URL",
-		"CLIRELAY_UPDATER_TOKEN",
-	}
-}
-
-func withoutEnvKeys(existing any, keys ...string) map[string]any {
-	env := mergeEnv(existing, nil)
-	for _, key := range keys {
-		delete(env, key)
-	}
-	return env
-}
-
-func mergeEnv(existing any, values map[string]any) map[string]any {
-	merged := map[string]any{}
-	if current, ok := stringMap(existing); ok {
-		for k, v := range current {
-			merged[k] = v
-		}
-	} else if current, ok := existing.([]any); ok {
-		for _, item := range current {
-			key, value, ok := strings.Cut(stringValue(item), "=")
-			if ok && strings.TrimSpace(key) != "" {
-				merged[strings.TrimSpace(key)] = value
-			}
-		}
-	}
-	for k, v := range values {
-		merged[k] = v
-	}
-	return merged
-}
-
-func appendVolume(existing any, volume string) []any {
-	var volumes []any
-	if current, ok := existing.([]any); ok {
-		volumes = append(volumes, current...)
-	} else if current, ok := existing.([]string); ok {
-		for _, item := range current {
-			volumes = append(volumes, item)
-		}
-	}
-	for _, item := range volumes {
-		if stringValue(item) == volume {
-			return volumes
-		}
-	}
-	return append(volumes, volume)
-}
-
-func stringMap(value any) (map[string]any, bool) {
-	out, ok := value.(map[string]any)
-	return out, ok
-}
-
-func stringValue(value any) string {
-	if text, ok := value.(string); ok {
-		return strings.TrimSpace(text)
-	}
-	return ""
-}
-
-func ensureRuntimeEnvFile(ctx context.Context, envFile string, projectDir string, service string, image string, reporter updateReporter) error {
-	data, err := os.ReadFile(envFile)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read docker env file: %w", err)
-	}
-	lines := splitEnvLines(string(data))
-	values := envValues(lines)
-	setEnvDefault(&lines, values, "CLI_PROXY_IMAGE", image)
-	setEnvDefaultOrReplaceWorkspace(&lines, values, "CLIRELAY_PROJECT_DIR", projectDir)
-	setEnvDefault(&lines, values, "CLIRELAY_TARGET_SERVICE", service)
-	setEnvDefault(&lines, values, "CLIRELAY_COMPOSE_PROJECT_NAME", filepath.Base(projectDir))
-	setEnvDefault(&lines, values, "CLIRELAY_UPDATER_TOKEN", envOrDefault("CLIRELAY_UPDATER_TOKEN", randomHex(16)))
-	setEnvDefault(&lines, values, "CLIRELAY_POSTGRES_DB", "cliproxy")
-	setEnvDefault(&lines, values, "CLIRELAY_POSTGRES_USER", "cliproxy")
-	setEnvDefault(&lines, values, "CLIRELAY_POSTGRES_PASSWORD", randomHex(16))
-	db := envOrDefaultValue(values["CLIRELAY_POSTGRES_DB"], "cliproxy")
-	user := envOrDefaultValue(values["CLIRELAY_POSTGRES_USER"], "cliproxy")
-	pass := envOrDefaultValue(values["CLIRELAY_POSTGRES_PASSWORD"], "cliproxy")
-	setEnvDefault(&lines, values, "CLIRELAY_POSTGRES_DSN", "postgres://"+user+":"+pass+"@postgres:5432/"+db+"?sslmode=disable")
-	setEnvDefaultOrReplaceWorkspace(&lines, values, "CLIRELAY_POSTGRES_DATA_PATH", filepath.Join(projectDir, "postgres-data"))
-	setEnvDefault(&lines, values, "CLIRELAY_REDIS_ENABLE", "true")
-	setEnvDefault(&lines, values, "CLIRELAY_REDIS_ADDR", "redis:6379")
-	setEnvDefault(&lines, values, "CLIRELAY_REDIS_DB", "0")
-	setEnvDefaultOrReplaceWorkspace(&lines, values, "CLIRELAY_REDIS_DATA_PATH", filepath.Join(projectDir, "redis-data"))
-	content := strings.Join(lines, "\n") + "\n"
-	if err := writeDeploymentFile(ctx, envFile, []byte(content), 0o600, reporter); err != nil {
-		return fmt.Errorf("write docker env file: %w", err)
-	}
-	return nil
-}
-
-func envValues(lines []string) map[string]string {
-	values := map[string]string{}
-	for _, line := range lines {
-		key, value, ok := strings.Cut(line, "=")
-		if ok {
-			values[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
-		}
-	}
-	return values
-}
-
-func setEnvDefault(lines *[]string, values map[string]string, key string, value string) {
-	if strings.TrimSpace(values[key]) != "" {
-		return
-	}
-	*lines = append(*lines, key+"="+value)
-	values[key] = value
-}
-
-func setEnvDefaultOrReplaceWorkspace(lines *[]string, values map[string]string, key string, value string) {
-	if existing := strings.TrimSpace(values[key]); existing != "" && !isWorkspacePath(existing) {
-		return
-	}
-	for i, line := range *lines {
-		currentKey, _, ok := strings.Cut(line, "=")
-		if ok && strings.TrimSpace(currentKey) == key {
-			(*lines)[i] = key + "=" + value
-			values[key] = value
-			return
-		}
-	}
-	*lines = append(*lines, key+"="+value)
-	values[key] = value
-}
-
-func isWorkspacePath(value string) bool {
-	clean := filepath.Clean(value)
-	return clean == "/workspace" || strings.HasPrefix(clean, "/workspace"+string(os.PathSeparator))
-}
-
-func randomHex(bytes int) string {
-	buf := make([]byte, bytes)
-	if _, err := rand.Read(buf); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(buf)
-}
-
-func writeDeploymentFile(ctx context.Context, path string, data []byte, mode os.FileMode, reporter updateReporter) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, data, mode); err == nil {
-		return nil
-	} else if fallbackErr := writeDeploymentFileViaDocker(ctx, path, data, mode, reporter); fallbackErr != nil {
-		return fmt.Errorf("%v; docker fallback failed: %w", err, fallbackErr)
-	}
-	return nil
-}
-
-func writeDeploymentFileViaDocker(ctx context.Context, path string, data []byte, mode os.FileMode, reporter updateReporter) error {
-	containerID, err := os.Hostname()
-	if err != nil || strings.TrimSpace(containerID) == "" {
-		return fmt.Errorf("detect updater container id: %w", err)
-	}
-	image, err := dockerInspect(ctx, containerID, "{{.Config.Image}}")
-	if err != nil {
-		return err
-	}
-	mountsJSON, err := dockerInspect(ctx, containerID, "{{json .Mounts}}")
-	if err != nil {
-		return err
-	}
-	var mounts []dockerMount
-	if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
-		return fmt.Errorf("parse updater container mounts: %w", err)
-	}
-	source, rel, dirMount, ok := hostPathForMountedPath(path, mounts)
-	if !ok {
-		return fmt.Errorf("no writable host mount found for %s", path)
-	}
-	reporter.Log("stdout", "direct write failed; updating deployment file through docker mount fallback")
-	modeText := fmt.Sprintf("%#o", mode.Perm())
-	var cmd *exec.Cmd
-	if dirMount {
-		script := `set -eu; target="/host/$TARGET_REL"; mkdir -p "$(dirname "$target")"; cat > "$target"; chmod "$TARGET_MODE" "$target"`
-		cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "-e", "TARGET_REL="+rel, "-e", "TARGET_MODE="+modeText, "-v", source+":/host", strings.TrimSpace(image), "sh", "-c", script)
-	} else {
-		script := `set -eu; cat > /target; chmod "$TARGET_MODE" /target`
-		cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "-e", "TARGET_MODE="+modeText, "-v", source+":/target", strings.TrimSpace(image), "sh", "-c", script)
-	}
-	cmd.Stdin = strings.NewReader(string(data))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker helper write failed: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func dockerInspect(ctx context.Context, containerID string, format string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", format, containerID)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("docker inspect updater container failed: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func hostPathForMountedPath(path string, mounts []dockerMount) (string, string, bool, bool) {
-	cleanPath := filepath.Clean(path)
-	var best dockerMount
-	bestLen := -1
-	for _, mount := range mounts {
-		if strings.TrimSpace(mount.Source) == "" || strings.TrimSpace(mount.Destination) == "" {
-			continue
-		}
-		dest := filepath.Clean(mount.Destination)
-		if cleanPath == dest {
-			return mount.Source, "", false, true
-		}
-		if strings.HasPrefix(cleanPath, dest+string(os.PathSeparator)) && len(dest) > bestLen {
-			best = mount
-			bestLen = len(dest)
-		}
-	}
-	if bestLen < 0 {
-		return "", "", false, false
-	}
-	rel, err := filepath.Rel(filepath.Clean(best.Destination), cleanPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", "", false, false
-	}
-	return best.Source, rel, true, true
-}
-
-func hasComposeService(content string, service string) bool {
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == service+":" && len(line) > len(strings.TrimLeft(line, " \t")) {
-			return true
-		}
-	}
-	return false
 }
 
 func runDockerCompose(ctx context.Context, composeFile string, envFile string, projectName string, reporter updateReporter, args ...string) error {

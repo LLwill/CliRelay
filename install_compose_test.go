@@ -69,7 +69,8 @@ func TestInstallComposeMirrorsDeploymentFilesAtHostPathInUpdater(t *testing.T) {
 	for _, want := range []string{
 		"CLIRELAY_COMPOSE_FILE: ${CLIRELAY_INSTALL_DIR}/docker-compose.yml",
 		"CLIRELAY_ENV_FILE: ${CLIRELAY_INSTALL_DIR}/.env",
-		".:${CLIRELAY_INSTALL_DIR}",
+		"./docker-compose.yml:${CLIRELAY_INSTALL_DIR}/docker-compose.yml:ro",
+		"./.env:${CLIRELAY_INSTALL_DIR}/.env",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("install.sh generated updater compose missing %q", want)
@@ -81,46 +82,9 @@ func TestInstallComposeMirrorsDeploymentFilesAtHostPathInUpdater(t *testing.T) {
 		"CLIRELAY_ENV_FILE: /workspace/.env",
 		"./docker-compose.yml:/workspace/docker-compose.yml:ro",
 		"./.env:/workspace/.env",
-		"./docker-compose.yml:${CLIRELAY_INSTALL_DIR}/docker-compose.yml:ro",
 	} {
 		if strings.Contains(content, forbidden) {
 			t.Fatalf("install.sh generated updater compose still contains /workspace mapping %q", forbidden)
-		}
-	}
-}
-
-func TestInstallComposeIncludesRuntimeDataStack(t *testing.T) {
-	data, err := os.ReadFile("install.sh")
-	if err != nil {
-		t.Fatalf("read install.sh: %v", err)
-	}
-	content := string(data)
-
-	for _, want := range []string{
-		`updater_token="${CLIRELAY_UPDATER_TOKEN:-$(rand_hex 16)}"`,
-		`postgres_db="${CLIRELAY_POSTGRES_DB:-cliproxy}"`,
-		`postgres_user="${CLIRELAY_POSTGRES_USER:-cliproxy}"`,
-		`postgres_password="${CLIRELAY_POSTGRES_PASSWORD:-$(rand_hex 16)}"`,
-		`postgres_dsn="${CLIRELAY_POSTGRES_DSN:-postgres://${postgres_user}:${postgres_password}@postgres:5432/${postgres_db}?sslmode=disable}"`,
-		`redis_addr="${CLIRELAY_REDIS_ADDR:-redis:6379}"`,
-		`redis_db="${CLIRELAY_REDIS_DB:-0}"`,
-		"CLIRELAY_UPDATER_TOKEN=${updater_token}",
-		"CLIRELAY_POSTGRES_DB=${postgres_db}",
-		"CLIRELAY_POSTGRES_USER=${postgres_user}",
-		"CLIRELAY_POSTGRES_DSN=${postgres_dsn}",
-		"CLIRELAY_REDIS_ENABLE=true",
-		"CLIRELAY_REDIS_ADDR=${redis_addr}",
-		"CLIRELAY_REDIS_DB=${redis_db}",
-		"CLIRELAY_POSTGRES_DATA_PATH=${postgres_data_path}",
-		"CLIRELAY_REDIS_DATA_PATH=${redis_data_path}",
-		"CLIRELAY_POSTGRES_DSN: ${CLIRELAY_POSTGRES_DSN}",
-		"CLIRELAY_REDIS_ENABLE: ${CLIRELAY_REDIS_ENABLE}",
-		"postgres:\n    image: postgres:15-alpine",
-		"redis:\n    image: redis:7-alpine",
-		"depends_on:\n      postgres:\n        condition: service_healthy\n      redis:\n        condition: service_healthy",
-	} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("install.sh missing runtime data stack text %q", want)
 		}
 	}
 }

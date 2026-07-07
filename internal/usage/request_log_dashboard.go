@@ -132,16 +132,20 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts storedTime
+		var ts string
 		var failedInt int
 		var totalTokens int64
 		if err := rows.Scan(&ts, &failedInt, &totalTokens); err != nil {
 			return DashboardTrends{}, fmt.Errorf("usage: scan dashboard trend row: %w", err)
 		}
-		if !ts.Valid {
-			continue
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			parsed, err = time.Parse(time.RFC3339, ts)
+			if err != nil {
+				continue
+			}
 		}
-		key := dashboardBucketKey(ts.Time.In(loc), days)
+		key := dashboardBucketKey(parsed.In(loc), days)
 		bucket := byKey[key]
 		if bucket == nil {
 			continue
@@ -260,15 +264,19 @@ func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]Dash
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts storedTime
+		var ts string
 		var totalTokens int64
 		if err := rows.Scan(&ts, &totalTokens); err != nil {
 			return nil, fmt.Errorf("usage: scan dashboard throughput row: %w", err)
 		}
-		if !ts.Valid {
-			continue
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			parsed, err = time.Parse(time.RFC3339, ts)
+			if err != nil {
+				continue
+			}
 		}
-		key := ts.Time.In(loc).Truncate(time.Minute).Format("2006-01-02 15:04")
+		key := parsed.In(loc).Truncate(time.Minute).Format("2006-01-02 15:04")
 		bucket := byKey[key]
 		if bucket == nil {
 			continue

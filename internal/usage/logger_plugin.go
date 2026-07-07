@@ -79,7 +79,6 @@ func InitRedis(cfg config.RedisConfig) {
 		return
 	}
 
-	redisCtx = context.Background()
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -127,11 +126,8 @@ func StopRedis() {
 	if redisClient != nil {
 		saveToRedis() // Perform a final save
 		redisClient.Close()
-		redisClient = nil
 		log.Infof("Redis usage persistence flushed and closed")
 	}
-	redisCancel = nil
-	redisCtx = context.Background()
 	CloseDB()
 }
 
