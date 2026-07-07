@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/openaicompat"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -85,7 +86,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		return []string{}
 	}
 
-	root := gjson.ParseBytes(rawJSON)
+	root := openaicompat.ParseResponseRoot(rawJSON)
 	obj := root.Get("object")
 	if obj.Exists() && obj.String() != "" && obj.String() != "chat.completion.chunk" {
 		return []string{}
@@ -609,7 +610,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	root := gjson.ParseBytes(rawJSON)
+	root := openaicompat.ParseResponseRoot(rawJSON)
 
 	// Basic response scaffold
 	resp := `{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`
@@ -706,7 +707,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	// Build output list from choices[...]
 	outputsWrapper := `{"arr":[]}`
 	// Detect and capture reasoning content if present
-	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+	rcText := root.Get("choices.0.message.reasoning_content").String()
 	includeReasoning := rcText != ""
 	if !includeReasoning && len(requestRawJSON) > 0 {
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()

@@ -38,3 +38,20 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesPreservesParallelT
 		}
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesUnwrapsProviderDataEnvelope(t *testing.T) {
+	raw := []byte(`{"success":true,"data":{"id":"chatcmpl_wrapped","object":"chat.completion","created":1,"model":"cline-pass/qwen3.7-max","choices":[{"index":0,"message":{"role":"assistant","content":"wrapped response ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "m", nil, nil, raw, nil)
+	for _, want := range []string{
+		`"model":"cline-pass/qwen3.7-max"`,
+		`"text":"wrapped response ok"`,
+		`"input_tokens":3`,
+		`"output_tokens":4`,
+		`"total_tokens":7`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in converted response:\n%s", want, out)
+		}
+	}
+}

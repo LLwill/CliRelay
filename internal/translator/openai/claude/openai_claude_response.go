@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/openaicompat"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -119,7 +120,7 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
 func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAIResponseToAnthropicParams) []string {
-	root := gjson.ParseBytes(rawJSON)
+	root := openaicompat.ParseResponseRoot(rawJSON)
 	var results []string
 
 	// Initialize parameters if needed
@@ -339,7 +340,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
 func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
-	root := gjson.ParseBytes(rawJSON)
+	root := openaicompat.ParseResponseRoot(rawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
@@ -571,7 +572,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
-	root := gjson.ParseBytes(rawJSON)
+	root := openaicompat.ParseResponseRoot(rawJSON)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
 	out, _ = sjson.Set(out, "model", root.Get("model").String())

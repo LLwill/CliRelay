@@ -3,6 +3,7 @@ package executor
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/openaicompat"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 )
@@ -29,7 +30,7 @@ func parseCodexUsage(data []byte) (usage.Detail, bool) {
 }
 
 func parseOpenAIUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data).Get("usage")
+	usageNode := openaicompat.ParseResponseRoot(data).Get("usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
@@ -69,7 +70,7 @@ func parseOpenAIResponseModel(data []byte) string {
 	if len(data) == 0 || !gjson.ValidBytes(data) {
 		return ""
 	}
-	return strings.TrimSpace(gjson.GetBytes(data, "model").String())
+	return strings.TrimSpace(openaicompat.ParseResponseRoot(data).Get("model").String())
 }
 
 func parseOpenAIStreamModel(line []byte) string {
@@ -77,7 +78,7 @@ func parseOpenAIStreamModel(line []byte) string {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return ""
 	}
-	return strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	return strings.TrimSpace(openaicompat.ParseResponseRoot(payload).Get("model").String())
 }
 
 func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
@@ -85,7 +86,7 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
+	usageNode := openaicompat.ParseResponseRoot(payload).Get("usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}

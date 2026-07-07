@@ -565,6 +565,21 @@ func TestOpenAINonStreamingEmptyToolNameSkippedAndStopReasonEndTurn(t *testing.T
 	}
 }
 
+func TestOpenAINonStreamingUnwrapsProviderDataEnvelope(t *testing.T) {
+	raw := []byte(`{"success":true,"data":{"id":"chatcmpl_wrapped","object":"chat.completion","created":1,"model":"cline-pass/qwen3.7-max","choices":[{"index":0,"message":{"role":"assistant","content":"wrapped ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}}`)
+
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", nil, nil, raw, nil)
+	if got := gjson.Get(out, "content.0.text").String(); got != "wrapped ok" {
+		t.Fatalf("text = %q, want wrapped ok; payload=%s", got, out)
+	}
+	if got := gjson.Get(out, "usage.input_tokens").Int(); got != 11 {
+		t.Fatalf("input tokens = %d, want 11; payload=%s", got, out)
+	}
+	if got := gjson.Get(out, "usage.output_tokens").Int(); got != 7 {
+		t.Fatalf("output tokens = %d, want 7; payload=%s", got, out)
+	}
+}
+
 func TestOpenAINonStreamingContentArrayEmptyToolNameSkipped(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl-empty-tool-array","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"tool_calls","tool_calls":[{"id":"call_empty","type":"function","function":{"name":"","arguments":"{\"path\":\"x\"}"}}]}]},"finish_reason":"tool_calls"}]}`)
 

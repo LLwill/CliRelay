@@ -57,9 +57,26 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageUnwrapsProviderDataEnvelope(t *testing.T) {
+	data := []byte(`{"success":true,"data":{"usage":{"prompt_tokens":9,"completion_tokens":5,"total_tokens":14}}}`)
+	detail := parseOpenAIUsage(data)
+	if detail.InputTokens != 9 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 9)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 14 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 14)
+	}
+}
+
 func TestParseOpenAIResponseModel(t *testing.T) {
 	if got := parseOpenAIResponseModel([]byte(`{"model":"gpt-5.4","usage":{"total_tokens":1}}`)); got != "gpt-5.4" {
 		t.Fatalf("model = %q, want gpt-5.4", got)
+	}
+	if got := parseOpenAIResponseModel([]byte(`{"success":true,"data":{"model":"cline-pass/qwen3.7-max","usage":{"total_tokens":1}}}`)); got != "cline-pass/qwen3.7-max" {
+		t.Fatalf("wrapped model = %q, want cline-pass/qwen3.7-max", got)
 	}
 	if got := parseOpenAIStreamModel([]byte(`data: {"model":"gpt-5.4-mini-2026-03-17","usage":{"total_tokens":1}}`)); got != "gpt-5.4-mini-2026-03-17" {
 		t.Fatalf("stream model = %q, want gpt-5.4-mini-2026-03-17", got)
