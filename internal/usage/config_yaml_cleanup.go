@@ -102,6 +102,7 @@ func cleanRuntimeSettingsFromYAML(configFilePath string) {
 		"bedrock-api-key":        true,
 		"opencode-go-api-key":    true,
 		"cline-api-key":          true,
+		"ollama-cloud-api-key":   true,
 		"openai-compatibility":   true,
 		"vertex-api-key":         true,
 		"claude-header-defaults": true,

@@ -374,6 +374,22 @@ func assertPostgresConfigCRUD(t *testing.T) {
 	if payload, ok := GetRuntimeSettingPayload(RuntimeSettingOAuthModelAlias); !ok || len(payload) == 0 {
 		t.Fatalf("GetRuntimeSettingPayload() payload=%s ok=%v", string(payload), ok)
 	}
+	if err := UpsertRuntimeSetting(RuntimeSettingClineKeys, []config.ClineKey{{
+		APIKey: "sk-cline-pg",
+		Models: []config.ClineModel{{
+			Name:  "cline-pass/qwen3.7-max",
+			Alias: "qwen3.7-max",
+		}},
+	}}); err != nil {
+		t.Fatalf("UpsertRuntimeSetting(ClineKey) error = %v", err)
+	}
+	cfg := &config.Config{}
+	if !ApplyStoredRuntimeSettings(cfg) {
+		t.Fatal("ApplyStoredRuntimeSettings returned false")
+	}
+	if len(cfg.ClineKey) != 1 || cfg.ClineKey[0].Models[0].Alias != "qwen3.7-max" {
+		t.Fatalf("ClineKey after postgres runtime apply = %#v", cfg.ClineKey)
+	}
 
 	imports := []CcSwitchImportConfigRow{{
 		ID:                   "cc-postgres-test",

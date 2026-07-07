@@ -42,7 +42,7 @@ func (s RuntimeSettingsStore) Payload(key string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	var payload string
-	if err := s.db.QueryRow(`SELECT payload FROM runtime_settings WHERE setting_key = ?`, key).Scan(&payload); err != nil {
+	if err := s.db.QueryRow(`SELECT payload FROM runtime_settings WHERE setting_key = $1`, key).Scan(&payload); err != nil {
 		if err != sql.ErrNoRows {
 			log.Warnf("sqlite/settings: load runtime setting %s: %v", key, err)
 		}
@@ -74,7 +74,7 @@ func (s RuntimeSettingsStore) Upsert(key string, value any) error {
 	}
 	_, err = s.db.Exec(
 		`INSERT INTO runtime_settings (setting_key, payload, updated_at)
-		 VALUES (?, ?, ?)
+		 VALUES ($1, $2, $3)
 		 ON CONFLICT(setting_key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
 		key,
 		string(payload),

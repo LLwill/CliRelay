@@ -110,6 +110,23 @@ claude-api-key:
   - api-key: sk-claude-test
     name: claude-primary
     base-url: https://claude.example.com
+opencode-go-api-key:
+  - api-key: sk-opencode-test
+    models:
+      - name: deepseek-v4-flash
+        alias: deepseek-v4-flash
+cline-api-key:
+  - api-key: sk-cline-test
+    name: cline-primary
+    base-url: https://api.cline.bot/api/v1
+    models:
+      - name: cline-pass/qwen3.7-max
+        alias: qwen3.7-max
+ollama-cloud-api-key:
+  - api-key: sk-ollama-test
+    base-url: https://ollama.com
+    models:
+      - name: gpt-oss:120b
 debug: true
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
@@ -122,14 +139,26 @@ debug: true
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "sk-claude-test", Name: "claude-primary", BaseURL: "https://claude.example.com"},
 		},
+		OpenCodeGoKey: []config.OpenCodeGoKey{
+			{APIKey: "sk-opencode-test", Models: []config.OpenCodeGoModel{{Name: "deepseek-v4-flash", Alias: "deepseek-v4-flash"}}},
+		},
+		ClineKey: []config.ClineKey{
+			{APIKey: "sk-cline-test", Name: "cline-primary", BaseURL: "https://api.cline.bot/api/v1", Models: []config.ClineModel{{Name: "cline-pass/qwen3.7-max", Alias: "qwen3.7-max"}}},
+		},
+		OllamaCloudKey: []config.OllamaCloudKey{
+			{APIKey: "sk-ollama-test", BaseURL: "https://ollama.com", Models: []config.OllamaCloudModel{{Name: "gpt-oss:120b"}}},
+		},
 	}
 
-	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 2 {
-		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 2", migrated)
+	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 5 {
+		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 5", migrated)
 	}
 
 	cfg.CodexKey = nil
 	cfg.ClaudeKey = nil
+	cfg.OpenCodeGoKey = nil
+	cfg.ClineKey = nil
+	cfg.OllamaCloudKey = nil
 	if !ApplyStoredRuntimeSettings(cfg) {
 		t.Fatal("ApplyStoredRuntimeSettings returned false")
 	}
@@ -139,12 +168,21 @@ debug: true
 	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].APIKey != "sk-claude-test" || cfg.ClaudeKey[0].Name != "claude-primary" {
 		t.Fatalf("ClaudeKey after DB apply = %#v", cfg.ClaudeKey)
 	}
+	if len(cfg.OpenCodeGoKey) != 1 || cfg.OpenCodeGoKey[0].APIKey != "sk-opencode-test" || cfg.OpenCodeGoKey[0].Models[0].Name != "deepseek-v4-flash" {
+		t.Fatalf("OpenCodeGoKey after DB apply = %#v", cfg.OpenCodeGoKey)
+	}
+	if len(cfg.ClineKey) != 1 || cfg.ClineKey[0].APIKey != "sk-cline-test" || cfg.ClineKey[0].Models[0].Alias != "qwen3.7-max" {
+		t.Fatalf("ClineKey after DB apply = %#v", cfg.ClineKey)
+	}
+	if len(cfg.OllamaCloudKey) != 1 || cfg.OllamaCloudKey[0].APIKey != "sk-ollama-test" || cfg.OllamaCloudKey[0].Models[0].Name != "gpt-oss:120b" {
+		t.Fatalf("OllamaCloudKey after DB apply = %#v", cfg.OllamaCloudKey)
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	for _, forbidden := range []string{"codex-api-key:", "claude-api-key:"} {
+	for _, forbidden := range []string{"codex-api-key:", "claude-api-key:", "opencode-go-api-key:", "cline-api-key:", "ollama-cloud-api-key:"} {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("%s should be removed from YAML after migration:\n%s", forbidden, string(data))
 		}
