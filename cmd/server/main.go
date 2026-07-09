@@ -52,6 +52,7 @@ type cliModeOptions struct {
 	iflowCookie      bool
 	antigravityLogin bool
 	kimiLogin        bool
+	xaiLogin         bool
 	tuiMode          bool
 	standalone       bool
 	isCloudDeploy    bool
@@ -81,6 +82,7 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
+	var xaiLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
@@ -104,6 +106,7 @@ func main() {
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -513,6 +516,7 @@ func main() {
 		iflowCookie:      iflowCookie,
 		antigravityLogin: antigravityLogin,
 		kimiLogin:        kimiLogin,
+		xaiLogin:         xaiLogin,
 		tuiMode:          tuiMode,
 		standalone:       standalone,
 		isCloudDeploy:    isCloudDeploy,
@@ -542,6 +546,8 @@ func runSelectedMode(cfg *config.Config, configFilePath string, options *cmd.Log
 		cmd.DoIFlowCookieAuth(cfg, options)
 	case mode.kimiLogin:
 		cmd.DoKimiLogin(cfg, options)
+	case mode.xaiLogin:
+		cmd.DoXAILogin(cfg, options)
 	default:
 		runServiceMode(cfg, configFilePath, mode.password, mode)
 	}

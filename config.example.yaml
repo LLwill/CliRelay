@@ -378,7 +378,7 @@ streaming:
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, xai, iflow, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
@@ -404,6 +404,9 @@ streaming:
 #   qwen:
 #     - name: "qwen3-coder-plus"
 #       alias: "qwen-plus"
+#   xai:
+#     - name: "grok-4.3"
+#       alias: "grok"
 #   iflow:
 #     - name: "glm-4.7"
 #       alias: "glm-god"

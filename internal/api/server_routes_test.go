@@ -81,6 +81,7 @@ func TestPublicAndOAuthRoutesRemainStable(t *testing.T) {
 		"GET /google/callback",
 		"GET /iflow/callback",
 		"GET /antigravity/callback",
+		"GET /xai/callback",
 	}
 	for _, key := range required {
 		if _, ok := routes[key]; !ok {

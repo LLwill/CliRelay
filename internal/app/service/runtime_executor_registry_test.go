@@ -42,6 +42,25 @@ func TestRegisterExecutorForAuthOllamaCloudUsesDedicatedExecutorWithCompatMetada
 	}
 }
 
+func TestRegisterExecutorForAuthXAIUsesDedicatedExecutor(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "xai-auth",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+	}
+
+	RegisterExecutorForAuth(manager, &config.Config{}, auth, false, nil)
+
+	got, ok := manager.Executor("xai")
+	if !ok || got == nil {
+		t.Fatal("expected xai executor after bind")
+	}
+	if _, ok := got.(*executor.XAIExecutor); !ok {
+		t.Fatalf("executor = %T, want *executor.XAIExecutor", got)
+	}
+}
+
 func (r *testModelRegistry) RegisterClient(_ string, _ string, models []*sdkmodelcatalog.ModelInfo) {
 	r.models = models
 	r.unregistered = false

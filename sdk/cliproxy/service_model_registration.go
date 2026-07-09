@@ -191,6 +191,9 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	case "qwen":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("qwen")
 		models = applyExcludedModels(models, excluded)
+	case "xai":
+		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("xai")
+		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)

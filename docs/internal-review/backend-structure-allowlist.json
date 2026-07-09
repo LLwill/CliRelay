@@ -3,7 +3,7 @@
     "allow_above_1200": [
       {
         "path": "internal/registry/model_definitions_static_data.go",
-        "max_lines": 1233,
+        "max_lines": 1321,
         "reason": "Static model definition data exception; keep out of business-logic large-file goals unless generation/storage changes."
       }
     ]
@@ -114,6 +114,13 @@
         "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen",
         "github.com/router-for-me/CLIProxyAPI/v6/internal/browser",
         "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+      ],
+      "sdk/auth/xai.go": [
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/xai",
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/browser",
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/config",
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/misc",
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/util"
       ]
     }
   },

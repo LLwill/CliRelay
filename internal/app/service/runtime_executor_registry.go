@@ -463,6 +463,8 @@ func RegisterExecutorForAuth(coreManager *coreauth.Manager, cfg *config.Config, 
 		coreManager.RegisterExecutor(executor.NewIFlowExecutor(cfg))
 	case "kimi":
 		coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
+	case "xai":
+		coreManager.RegisterExecutor(executor.NewXAIExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 		if providerKey == "" {

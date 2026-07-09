@@ -18,6 +18,7 @@ import (
 //   - aistudio
 //   - bedrock
 //   - codex
+//   - xai
 //   - qwen
 //   - iflow
 //   - kimi
@@ -42,6 +43,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetOpenAIModels()
+	case "xai", "x-ai", "grok":
+		return GetXAIModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -97,6 +100,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetGeminiCLIModels(),
 		GetAIStudioModels(),
 		GetOpenAIModels(),
+		GetXAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
 		GetKimiModels(),

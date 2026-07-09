@@ -15,6 +15,7 @@ import (
 	iflowprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/iflow"
 	kimiprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/kimi"
 	qwenprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/qwen"
+	xaiprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/xai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -257,6 +258,50 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"status": "ok", "url": result.AuthURL, "state": result.State})
+}
+
+func (h *Handler) RequestXAIToken(c *gin.Context) {
+	ctx := detachedAuthContext(c)
+
+	result, err := xaiprovider.StartOAuthLogin(ctx, xaiprovider.OAuthLoginOptions{
+		Config:              h.cfg,
+		WebUI:               isWebUIRequest(c),
+		CallbackTarget:      h.managementCallbackURL,
+		WaitCallback:        WaitOAuthCallbackFile,
+		CallbackWaitTimeout: oauthCallbackWaitTimeout,
+		SaveRecord:          h.saveTokenRecord,
+		Sessions: xaiprovider.SessionCallbacks{
+			Register:         RegisterOAuthSession,
+			SetError:         SetOAuthSessionError,
+			Complete:         CompleteOAuthSession,
+			CompleteProvider: CompleteOAuthSessionsByProvider,
+		},
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, xaiprovider.ErrPKCEGeneration):
+			log.WithError(err).Error("failed to generate xai PKCE codes")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		case errors.Is(err, xaiprovider.ErrStateGeneration):
+			log.WithError(err).Error("failed to generate xai state parameter")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		case errors.Is(err, xaiprovider.ErrCallbackUnavailable):
+			log.WithError(err).Error("failed to compute xai callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+		case errors.Is(err, xaiprovider.ErrCallbackStart):
+			log.WithError(err).Error("failed to start xai callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+		case errors.Is(err, xaiprovider.ErrDiscovery), errors.Is(err, xaiprovider.ErrAuthURL):
+			log.WithError(err).Error("failed to start xai oauth flow")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		default:
+			log.WithError(err).Error("failed to start xai oauth flow")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start oauth flow"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": result.AuthURL, "state": result.State})
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {

@@ -18,6 +18,7 @@ func (s *Server) registerOAuthCallbackRoutes() {
 	s.registerPendingOAuthCallbackRoute("/google/callback", "gemini")
 	s.registerPendingOAuthCallbackRoute("/iflow/callback", "iflow")
 	s.registerPendingOAuthCallbackRoute("/antigravity/callback", "antigravity")
+	s.registerPendingOAuthCallbackRoute("/xai/callback", "xai")
 }
 
 func (s *Server) registerPendingOAuthCallbackRoute(path, provider string) {
