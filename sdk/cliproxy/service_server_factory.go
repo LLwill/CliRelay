@@ -12,6 +12,9 @@ func (s *Service) buildServerOptions() []api.ServerOption {
 	serverOptions = append(serverOptions, api.WithConfigMutatedCallback(func(updated *config.Config) {
 		s.applyConfigReload(updated, true)
 	}))
+	serverOptions = append(serverOptions, api.WithModelConfigMutatedCallback(func() {
+		s.refreshRegisteredModels(context.Background())
+	}))
 	return serverOptions
 }
 

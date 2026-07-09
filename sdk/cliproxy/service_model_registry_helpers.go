@@ -323,8 +323,6 @@ func modelConfigOwnerAliases(provider string) map[string]struct{} {
 		values = append(values, "anthropic", "claude-code")
 	case "gemini", "gemini-cli", "vertex":
 		values = append(values, "google")
-	case "codex":
-		values = append(values, "openai")
 	}
 	out := make(map[string]struct{}, len(values))
 	for _, value := range values {

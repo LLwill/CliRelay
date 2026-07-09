@@ -97,6 +97,7 @@ func (h *ModelsHandler) PostModelConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.notifyModelConfigMutated()
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -116,6 +117,7 @@ func (h *ModelsHandler) PutModelConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.notifyModelConfigMutated()
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -129,6 +131,7 @@ func (h *ModelsHandler) DeleteModelConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.notifyModelConfigMutated()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -240,5 +243,13 @@ func (h *ModelsHandler) PostOpenRouterModelSyncRun(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "state": state})
 		return
 	}
+	h.notifyModelConfigMutated()
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "result": result, "state": state})
+}
+
+func (h *ModelsHandler) notifyModelConfigMutated() {
+	if h == nil || h.Handler == nil || h.onModelConfigMutated == nil {
+		return
+	}
+	h.onModelConfigMutated()
 }

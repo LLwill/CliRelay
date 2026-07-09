@@ -90,9 +90,7 @@ func (s *Service) applyConfigReload(newCfg *config.Config, refreshRegisteredMode
 	}
 	s.rebindExecutors()
 	if refreshRegisteredModels && s.coreManager != nil {
-		for _, auth := range s.coreManager.List() {
-			s.registerModelsForAuth(context.Background(), auth)
-		}
+		s.refreshRegisteredModels(context.Background())
 	}
 }
 

@@ -88,6 +88,10 @@ func WithConfigMutatedCallback(fn func(*sdkconfig.Config)) ServerOption {
 	return coreapi.WithConfigMutatedCallback(fn)
 }
 
+func WithModelConfigMutatedCallback(fn func()) ServerOption {
+	return coreapi.WithModelConfigMutatedCallback(fn)
+}
+
 func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption {
 	return coreapi.WithKeepAliveEndpoint(timeout, onTimeout)
 }

@@ -205,6 +205,9 @@ func (s *Server) configureManagementHandler(
 	if optionState != nil && optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
+	if optionState != nil && optionState.modelConfigMutatedCallback != nil {
+		s.mgmt.SetModelConfigMutatedHook(optionState.modelConfigMutatedCallback)
+	}
 }
 
 func (s *Server) registerBuiltinModules(cfg *config.Config, accessManager *sdkaccess.Manager) {

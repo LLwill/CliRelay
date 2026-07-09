@@ -39,27 +39,28 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	onConfigMutated     func(*config.Config)
-	startTime           time.Time
-	attemptCleanupStop  chan struct{}
-	attemptCleanupOnce  sync.Once
-	accessManager       *sdkaccess.Manager
-	trendCacheMu        sync.Mutex
-	trendCache          map[string]trendCacheEntry
-	imageGeneration     *imagegeneration.Service
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	onConfigMutated      func(*config.Config)
+	onModelConfigMutated func()
+	startTime            time.Time
+	attemptCleanupStop   chan struct{}
+	attemptCleanupOnce   sync.Once
+	accessManager        *sdkaccess.Manager
+	trendCacheMu         sync.Mutex
+	trendCache           map[string]trendCacheEntry
+	imageGeneration      *imagegeneration.Service
 }
 
 type trendCacheEntry struct {
@@ -171,6 +172,8 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 }
 
 func (h *Handler) SetConfigMutatedHook(fn func(*config.Config)) { h.onConfigMutated = fn }
+
+func (h *Handler) SetModelConfigMutatedHook(fn func()) { h.onModelConfigMutated = fn }
 
 // SetAccessManager wires the request authentication access manager so management writes
 // (such as API key channel/model restrictions) can be applied immediately at runtime.
