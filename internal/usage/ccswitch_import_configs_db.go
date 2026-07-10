@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	log "github.com/sirupsen/logrus"
 )
@@ -300,7 +301,7 @@ func normalizeCcSwitchModelMappings(values []CcSwitchModelMappingRow) []CcSwitch
 			Role:          role,
 			RequestModel:  requestModel,
 			TargetModel:   targetModel,
-			ContextWindow: normalizeCcSwitchContextWindow(value.ContextWindow),
+			ContextWindow: normalizeCcSwitchContextWindowForModels(value.ContextWindow, requestModel, targetModel),
 		})
 	}
 	if result == nil {
@@ -314,6 +315,20 @@ func normalizeCcSwitchContextWindow(value int) int {
 		return 0
 	}
 	return value
+}
+
+func normalizeCcSwitchContextWindowForModels(value int, modelIDs ...string) int {
+	contextWindow := normalizeCcSwitchContextWindow(value)
+	if contextWindow == 0 {
+		return 0
+	}
+	for _, modelID := range modelIDs {
+		capability, ok := registry.GetCodexModelCapability(modelID)
+		if ok && contextWindow > capability.MaxContextWindow {
+			return capability.MaxContextWindow
+		}
+	}
+	return contextWindow
 }
 
 func normalizeCcSwitchModelRole(value string) string {
