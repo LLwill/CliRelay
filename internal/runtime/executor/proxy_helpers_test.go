@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -224,5 +226,76 @@ func TestNewProxyAwareHTTPClientRecordsProxyUpstreamTiming(t *testing.T) {
 	}
 	if _, ok := detail.Timing["got_conn_reused"]; !ok {
 		t.Fatalf("upstream_timing missing got_conn_reused: %#v", detail.Timing)
+	}
+}
+
+func TestNewProxyAwareHTTPClientReusesDirectTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	first := newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+	second := newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+
+	if first.Transport == nil || second.Transport == nil {
+		t.Fatal("expected direct transports")
+	}
+	if first.Transport != second.Transport {
+		t.Fatal("expected direct requests with the same network configuration to reuse one transport")
+	}
+}
+
+func TestNewProxyAwareHTTPClientSeparatesDirectTransportByNetworkConfig(t *testing.T) {
+	t.Parallel()
+
+	normal := &config.Config{}
+	ipv4Only := &config.Config{}
+	ipv4Only.PreferIPv4 = true
+	insecureTLS := &config.Config{}
+	insecureTLS.InsecureSkipVerify = true
+
+	normalClient := newProxyAwareHTTPClient(context.Background(), normal, nil, 0)
+	ipv4Client := newProxyAwareHTTPClient(context.Background(), ipv4Only, nil, 0)
+	insecureClient := newProxyAwareHTTPClient(context.Background(), insecureTLS, nil, 0)
+
+	if normalClient.Transport == ipv4Client.Transport {
+		t.Fatal("prefer-ipv4 change must use a distinct direct transport")
+	}
+	if normalClient.Transport == insecureClient.Transport {
+		t.Fatal("TLS configuration change must use a distinct direct transport")
+	}
+}
+
+func TestNewProxyAwareHTTPClientReusesDirectConnectionAcrossClients(t *testing.T) {
+	t.Parallel()
+
+	var newConnections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	cfg := &config.Config{}
+	for range 2 {
+		client := newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+		resp, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("client.Get: %v", err)
+		}
+		if _, err = io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if err = resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}
+	if got := newConnections.Load(); got != 1 {
+		t.Fatalf("new connections = %d, want 1 shared keep-alive connection", got)
 	}
 }

@@ -1,13 +1,17 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -39,10 +43,164 @@ type upstreamRequestLog struct {
 	AuthValue string
 }
 
+const apiExchangeResponseMemoryLimit = 256 * 1024
+
+type apiExchangeBuffer struct {
+	buffer bytes.Buffer
+	file   *os.File
+	writer *bufio.Writer
+	path   string
+	size   int64
+}
+
+func (b *apiExchangeBuffer) Write(data []byte) (int, error) {
+	if b == nil || len(data) == 0 {
+		return len(data), nil
+	}
+	if b.file == nil && b.buffer.Len()+len(data) > apiExchangeResponseMemoryLimit {
+		b.spillToFile()
+	}
+	if b.file != nil {
+		n, err := b.writer.Write(data)
+		b.size += int64(n)
+		if err == nil {
+			return n, nil
+		}
+		b.fallbackToMemory()
+		remaining := data[n:]
+		written, writeErr := b.buffer.Write(remaining)
+		b.size += int64(written)
+		return n + written, writeErr
+	}
+	n, err := b.buffer.Write(data)
+	b.size += int64(n)
+	return n, err
+}
+
+func (b *apiExchangeBuffer) WriteString(value string) (int, error) {
+	if b == nil || value == "" {
+		return len(value), nil
+	}
+	if b.file == nil && b.buffer.Len()+len(value) > apiExchangeResponseMemoryLimit {
+		b.spillToFile()
+	}
+	if b.file != nil {
+		n, err := b.writer.WriteString(value)
+		b.size += int64(n)
+		if err == nil {
+			return n, nil
+		}
+		b.fallbackToMemory()
+		written, writeErr := b.buffer.WriteString(value[n:])
+		b.size += int64(written)
+		return n + written, writeErr
+	}
+	n, err := b.buffer.WriteString(value)
+	b.size += int64(n)
+	return n, err
+}
+
+func (b *apiExchangeBuffer) Len() int {
+	if b == nil {
+		return 0
+	}
+	return int(b.size)
+}
+
+func (b *apiExchangeBuffer) Snapshot() []byte {
+	if b == nil || b.size == 0 {
+		return nil
+	}
+	if b.file == nil {
+		return bytes.Clone(b.buffer.Bytes())
+	}
+	if b.writer != nil {
+		if err := b.writer.Flush(); err != nil {
+			return nil
+		}
+	}
+	current, err := b.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil
+	}
+	if _, err = b.file.Seek(0, io.SeekStart); err != nil {
+		return nil
+	}
+	data, err := io.ReadAll(b.file)
+	_, _ = b.file.Seek(current, io.SeekStart)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func (b *apiExchangeBuffer) Close() error {
+	if b == nil {
+		return nil
+	}
+	var closeErr error
+	if b.file != nil {
+		if b.writer != nil {
+			closeErr = b.writer.Flush()
+			b.writer = nil
+		}
+		if err := b.file.Close(); closeErr == nil {
+			closeErr = err
+		}
+		b.file = nil
+	}
+	if b.path != "" {
+		if err := os.Remove(b.path); err != nil && !os.IsNotExist(err) && closeErr == nil {
+			closeErr = err
+		}
+		b.path = ""
+	}
+	b.buffer.Reset()
+	b.size = 0
+	return closeErr
+}
+
+func (b *apiExchangeBuffer) spillToFile() {
+	file, err := os.CreateTemp("", "clirelay-api-exchange-*")
+	if err != nil {
+		return
+	}
+	if b.buffer.Len() > 0 {
+		if _, err = file.Write(b.buffer.Bytes()); err != nil {
+			_ = file.Close()
+			_ = os.Remove(file.Name())
+			return
+		}
+		b.buffer.Reset()
+	}
+	b.file = file
+	b.writer = bufio.NewWriterSize(file, 64*1024)
+	b.path = file.Name()
+}
+
+func (b *apiExchangeBuffer) fallbackToMemory() {
+	if b.file == nil {
+		return
+	}
+	path := b.path
+	if b.writer != nil {
+		_ = b.writer.Flush()
+		b.writer = nil
+	}
+	_, _ = b.file.Seek(0, io.SeekStart)
+	data, _ := io.ReadAll(b.file)
+	_ = b.file.Close()
+	_ = os.Remove(path)
+	b.file = nil
+	b.path = ""
+	b.buffer.Reset()
+	_, _ = b.buffer.Write(data)
+}
+
 type upstreamAttempt struct {
 	index                int
 	request              string
-	response             *strings.Builder
+	response             *apiExchangeBuffer
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
@@ -51,7 +209,61 @@ type upstreamAttempt struct {
 	errorWritten         bool
 }
 
-// recordAPIRequest stores the upstream request metadata in Gin context for request logging.
+type apiExchangeCapture struct {
+	mu                     sync.Mutex
+	attempts               []*upstreamAttempt
+	cachedRequestSnapshot  []byte
+	cachedResponseSnapshot []byte
+}
+
+func (c *apiExchangeCapture) APIRequestSnapshot() []byte {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cachedRequestSnapshot == nil {
+		c.cachedRequestSnapshot = aggregateAPIRequests(c.attempts)
+	}
+	return c.cachedRequestSnapshot
+}
+
+func (c *apiExchangeCapture) APIResponseSnapshot() []byte {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cachedResponseSnapshot == nil {
+		c.cachedResponseSnapshot = aggregateAPIResponses(c.attempts)
+	}
+	return c.cachedResponseSnapshot
+}
+
+func (c *apiExchangeCapture) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var closeErr error
+	for _, attempt := range c.attempts {
+		if attempt == nil || attempt.response == nil {
+			continue
+		}
+		if err := attempt.response.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	c.attempts = nil
+	c.cachedRequestSnapshot = nil
+	c.cachedResponseSnapshot = nil
+	return closeErr
+}
+
+// recordAPIRequest stores the upstream request metadata in an incremental
+// per-request capture. Full response snapshots are materialized only when the
+// request log is finalized, not after every streaming chunk.
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
@@ -62,9 +274,9 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 		return
 	}
 
-	attempts := getAttempts(ginCtx)
-	index := len(attempts) + 1
-
+	capture := ensureAPIExchangeCapture(ginCtx)
+	capture.mu.Lock()
+	index := len(capture.attempts) + 1
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
@@ -83,79 +295,69 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
+		builder.Write(info.Body)
 	} else {
 		builder.WriteString("<empty>")
 	}
 	builder.WriteString("\n\n")
-
-	attempt := &upstreamAttempt{
+	capture.attempts = append(capture.attempts, &upstreamAttempt{
 		index:    index,
 		request:  builder.String(),
-		response: &strings.Builder{},
-	}
-	attempts = append(attempts, attempt)
-	ginCtx.Set(apiAttemptsKey, attempts)
-	updateAggregatedRequest(ginCtx, attempts)
+		response: &apiExchangeBuffer{},
+	})
+	capture.cachedRequestSnapshot = nil
+	capture.cachedResponseSnapshot = nil
+	requestSnapshot := aggregateAPIRequests(capture.attempts)
+	capture.cachedRequestSnapshot = requestSnapshot
+	capture.mu.Unlock()
+
+	// Preserve the legacy context contract for existing request-log consumers.
+	ginCtx.Set(apiRequestKey, requestSnapshot)
 }
 
-// recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	diagnostics.SetUpstreamResponse(ctx, status)
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	capture, attempt := captureAttempt(ctx, cfg)
+	if capture == nil || attempt == nil {
 		return
 	}
-	if !shouldCaptureAPIExchangeLog(cfg) {
-		return
-	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	defer capture.mu.Unlock()
 	ensureResponseIntro(attempt)
-
 	if status > 0 && !attempt.statusWritten {
-		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
+		writeAPIExchangeString(attempt.response, fmt.Sprintf("Status: %d\n", status))
 		attempt.statusWritten = true
 	}
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
+		writeAPIExchangeString(attempt.response, "Headers:\n")
 		writeHeaders(attempt.response, headers)
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		writeAPIExchangeString(attempt.response, "\n")
 	}
-
-	updateAggregatedResponse(ginCtx, attempts)
+	capture.cachedResponseSnapshot = nil
 }
 
-// recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
 	if err == nil {
 		return
 	}
 	diagnostics.SetUpstreamError(ctx, err)
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	capture, attempt := captureAttempt(ctx, cfg)
+	if capture == nil || attempt == nil {
 		return
 	}
-	if !shouldCaptureAPIExchangeLog(cfg) {
-		return
-	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	defer capture.mu.Unlock()
 	ensureResponseIntro(attempt)
-
 	if attempt.bodyStarted && !attempt.bodyHasContent {
-		// Ensure body does not stay empty marker if error arrives first.
 		attempt.bodyStarted = false
 	}
 	if attempt.errorWritten {
-		attempt.response.WriteString("\n")
+		writeAPIExchangeString(attempt.response, "\n")
 	}
-	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	writeAPIExchangeString(attempt.response, fmt.Sprintf("Error: %s\n", err.Error()))
 	attempt.errorWritten = true
-
-	updateAggregatedResponse(ginCtx, attempts)
+	capture.cachedResponseSnapshot = nil
 }
 
-// appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
 	if !shouldCaptureAPIExchangeLog(cfg) {
 		return
@@ -164,54 +366,40 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if len(data) == 0 {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	capture, attempt := captureAttempt(ctx, cfg)
+	if capture == nil || attempt == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	defer capture.mu.Unlock()
 	ensureResponseIntro(attempt)
-
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
+		writeAPIExchangeString(attempt.response, "Headers:\n")
 		writeHeaders(attempt.response, nil)
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		writeAPIExchangeString(attempt.response, "\n")
 	}
 	if !attempt.bodyStarted {
-		attempt.response.WriteString("Body:\n")
+		writeAPIExchangeString(attempt.response, "Body:\n")
 		attempt.bodyStarted = true
 	}
 	if attempt.bodyHasContent {
-		attempt.response.WriteString("\n\n")
+		writeAPIExchangeString(attempt.response, "\n\n")
 	}
-	attempt.response.WriteString(string(data))
+	writeAPIExchangeBytes(attempt.response, data)
 	attempt.bodyHasContent = true
-
-	updateAggregatedResponse(ginCtx, attempts)
+	capture.cachedResponseSnapshot = nil
 }
 
 func shouldCaptureAPIExchangeLog(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	return cfg.RequestLog || cfg.RequestLogStorage.StoreContent
+	return cfg != nil && (cfg.RequestLog || cfg.RequestLogStorage.StoreContent)
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
-	ginCtx, _ := ctx.Value(util.ContextKeyGin).(*gin.Context)
-	return ginCtx
-}
-
-func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {
-	if ginCtx == nil {
+	if ctx == nil {
 		return nil
 	}
-	if value, exists := ginCtx.Get(apiAttemptsKey); exists {
-		if attempts, ok := value.([]*upstreamAttempt); ok {
-			return attempts
-		}
-	}
-	return nil
+	ginCtx, _ := ctx.Value(util.ContextKeyGin).(*gin.Context)
+	return ginCtx
 }
 
 func nextUpstreamDiagnosticAttempt(ginCtx *gin.Context) int {
@@ -232,72 +420,108 @@ func nextUpstreamDiagnosticAttempt(ginCtx *gin.Context) int {
 	return count
 }
 
-func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
-	attempts := getAttempts(ginCtx)
-	if len(attempts) == 0 {
-		attempt := &upstreamAttempt{
+func ensureAPIExchangeCapture(ginCtx *gin.Context) *apiExchangeCapture {
+	if raw, exists := ginCtx.Get(apiAttemptsKey); exists {
+		if capture, ok := raw.(*apiExchangeCapture); ok && capture != nil {
+			return capture
+		}
+	}
+	capture := &apiExchangeCapture{}
+	ginCtx.Set(apiAttemptsKey, capture)
+	logging.SetAPIExchangeProvider(ginCtx, capture)
+	return capture
+}
+
+func captureAttempt(ctx context.Context, cfg *config.Config) (*apiExchangeCapture, *upstreamAttempt) {
+	if !shouldCaptureAPIExchangeLog(cfg) {
+		return nil, nil
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return nil, nil
+	}
+	capture := ensureAPIExchangeCapture(ginCtx)
+	capture.mu.Lock()
+	if len(capture.attempts) == 0 {
+		capture.attempts = append(capture.attempts, &upstreamAttempt{
 			index:    1,
 			request:  "=== API REQUEST 1 ===\n<missing>\n\n",
-			response: &strings.Builder{},
-		}
-		attempts = []*upstreamAttempt{attempt}
-		ginCtx.Set(apiAttemptsKey, attempts)
-		updateAggregatedRequest(ginCtx, attempts)
+			response: &apiExchangeBuffer{},
+		})
+		capture.cachedRequestSnapshot = aggregateAPIRequests(capture.attempts)
+		ginCtx.Set(apiRequestKey, capture.cachedRequestSnapshot)
 	}
-	return attempts, attempts[len(attempts)-1]
+	return capture, capture.attempts[len(capture.attempts)-1]
 }
 
 func ensureResponseIntro(attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
-	attempt.response.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
-	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	attempt.response.WriteString("\n")
+	writeAPIExchangeString(attempt.response, fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
+	writeAPIExchangeString(attempt.response, fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	writeAPIExchangeString(attempt.response, "\n")
 	attempt.responseIntroWritten = true
 }
 
-func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
+func aggregateAPIRequests(attempts []*upstreamAttempt) []byte {
 	var builder strings.Builder
 	for _, attempt := range attempts {
-		builder.WriteString(attempt.request)
+		if attempt != nil {
+			builder.WriteString(attempt.request)
+		}
 	}
-	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+	if builder.Len() == 0 {
+		return nil
+	}
+	return []byte(builder.String())
 }
 
-func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
+func aggregateAPIResponses(attempts []*upstreamAttempt) []byte {
 	var builder strings.Builder
 	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
+		if attempt == nil || attempt.response == nil || attempt.response.Len() == 0 {
 			continue
 		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
-		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
+		responseBytes := attempt.response.Snapshot()
+		builder.Write(responseBytes)
+		if !bytes.HasSuffix(responseBytes, []byte("\n")) {
 			builder.WriteString("\n")
 		}
 		if idx < len(attempts)-1 {
 			builder.WriteString("\n")
 		}
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	if builder.Len() == 0 {
+		return nil
+	}
+	return []byte(builder.String())
 }
 
-func writeHeaders(builder *strings.Builder, headers http.Header) {
+func writeAPIExchangeString(writer interface{ WriteString(string) (int, error) }, value string) {
+	if writer == nil || value == "" {
+		return
+	}
+	if _, err := writer.WriteString(value); err != nil {
+		log.WithError(err).Warn("failed to capture API exchange text")
+	}
+}
+
+func writeAPIExchangeBytes(writer io.Writer, value []byte) {
+	if writer == nil || len(value) == 0 {
+		return
+	}
+	if _, err := writer.Write(value); err != nil {
+		log.WithError(err).Warn("failed to capture API exchange bytes")
+	}
+}
+
+func writeHeaders(builder interface{ WriteString(string) (int, error) }, headers http.Header) {
 	if builder == nil {
 		return
 	}
 	if len(headers) == 0 {
-		builder.WriteString("<none>\n")
+		writeAPIExchangeString(builder, "<none>\n")
 		return
 	}
 	keys := make([]string, 0, len(headers))
@@ -308,12 +532,12 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 	for _, key := range keys {
 		values := headers[key]
 		if len(values) == 0 {
-			builder.WriteString(fmt.Sprintf("%s:\n", key))
+			writeAPIExchangeString(builder, fmt.Sprintf("%s:\n", key))
 			continue
 		}
 		for _, value := range values {
 			masked := util.MaskSensitiveHeaderValue(key, value)
-			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
+			writeAPIExchangeString(builder, fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
 }

@@ -188,13 +188,13 @@ func TestClaudeExecutorLearnsAndAppliesClaudeCodeFingerprint(t *testing.T) {
 		t.Fatalf("metadata.user_id = %#v, want account UUID and fixed session", userID)
 	}
 
-	record, err := usage.GetIdentityFingerprint(identityfingerprint.ProviderClaude, authSubjectKey(t, auth))
-	if err != nil {
-		t.Fatalf("GetIdentityFingerprint returned error: %v", err)
-	}
-	if record == nil || record.Fields[identityfingerprint.FieldClaudeCLIVersion] != "2.1.200" {
-		t.Fatalf("learned record = %#v, want Claude CLI version learned", record)
-	}
+	accountKey := authSubjectKey(t, auth)
+	var record *identityfingerprint.LearnedRecord
+	eventually(t, 5*time.Second, func() bool {
+		var err error
+		record, err = usage.GetIdentityFingerprint(identityfingerprint.ProviderClaude, accountKey)
+		return err == nil && record != nil && record.Fields[identityfingerprint.FieldClaudeCLIVersion] == "2.1.200"
+	})
 }
 
 func TestClaudeCountTokensLearnsAndAppliesClaudeCodeFingerprint(t *testing.T) {

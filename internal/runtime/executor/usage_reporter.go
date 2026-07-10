@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ type usageReporter struct {
 
 	// Content captured for log detail viewer
 	inputContent  string
+	inputPath     string
 	outputContent string
 	outputBuilder strings.Builder
 	outputFile    *os.File
@@ -72,8 +74,10 @@ func (r *usageReporter) publish(ctx context.Context, detail coreusage.Detail) {
 }
 
 func (r *usageReporter) publishWithContent(ctx context.Context, detail coreusage.Detail, inputContent, outputContent string) {
-	r.inputContent = inputContent
+	r.contentMu.Lock()
+	r.setInputContentLocked(inputContent)
 	r.outputContent = outputContent
+	r.contentMu.Unlock()
 	r.publishWithOutcome(ctx, detail, false)
 }
 
@@ -117,7 +121,7 @@ func (r *usageReporter) setInputContent(content string) {
 	}
 	r.contentMu.Lock()
 	defer r.contentMu.Unlock()
-	r.inputContent = content
+	r.setInputContentLocked(content)
 }
 
 // appendOutputChunk accumulates a streaming response line for inclusion in usage records.
@@ -166,7 +170,7 @@ func (r *usageReporter) publishFailureWithContent(ctx context.Context, inputCont
 		return
 	}
 	r.contentMu.Lock()
-	r.inputContent = inputContent
+	r.setInputContentLocked(inputContent)
 	r.outputContent = outputContent
 	r.contentMu.Unlock()
 	r.publishWithOutcome(ctx, coreusage.Detail{}, true)
@@ -250,12 +254,14 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail coreusage
 		return
 	}
 	r.once.Do(func() {
-		inputContent, outputContent := r.finalizeContent()
+		inputContent, outputContent, inputPath, outputPath := r.finalizeContent()
+		detailContent, detailPath := deferLargeContent("cliproxy-usage-detail-*", buildRequestDetailContent(ctx))
 		latencyMs := time.Since(r.requestedAt).Milliseconds()
 		if latencyMs < 0 {
 			latencyMs = 0
 		}
 		firstTokenMs := firstTokenLatencyMsFromContext(ctx, r.requestedAt)
+		apiIdentifier, requestID, responseStatus := usageRequestMetadata(ctx)
 		coreusage.PublishRecord(ctx, coreusage.Record{
 			Provider:            r.provider,
 			Model:               r.model,
@@ -273,10 +279,16 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail coreusage
 			LatencyMs:           latencyMs,
 			FirstTokenMs:        firstTokenMs,
 			Failed:              failed,
+			APIIdentifier:       apiIdentifier,
+			RequestID:           requestID,
+			ResponseStatus:      responseStatus,
 			Detail:              detail,
 			InputContent:        inputContent,
 			OutputContent:       outputContent,
-			DetailContent:       buildRequestDetailContent(ctx),
+			DetailContent:       detailContent,
+			InputContentPath:    inputPath,
+			OutputContentPath:   outputPath,
+			DetailContentPath:   detailPath,
 		})
 	})
 }
@@ -290,12 +302,14 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		inputContent, outputContent := r.finalizeContent()
+		inputContent, outputContent, inputPath, outputPath := r.finalizeContent()
+		detailContent, detailPath := deferLargeContent("cliproxy-usage-detail-*", buildRequestDetailContent(ctx))
 		latencyMs := time.Since(r.requestedAt).Milliseconds()
 		if latencyMs < 0 {
 			latencyMs = 0
 		}
 		firstTokenMs := firstTokenLatencyMsFromContext(ctx, r.requestedAt)
+		apiIdentifier, requestID, responseStatus := usageRequestMetadata(ctx)
 		coreusage.PublishRecord(ctx, coreusage.Record{
 			Provider:            r.provider,
 			Model:               r.model,
@@ -313,10 +327,16 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			LatencyMs:           latencyMs,
 			FirstTokenMs:        firstTokenMs,
 			Failed:              false,
+			APIIdentifier:       apiIdentifier,
+			RequestID:           requestID,
+			ResponseStatus:      responseStatus,
 			Detail:              coreusage.Detail{},
 			InputContent:        inputContent,
 			OutputContent:       outputContent,
-			DetailContent:       buildRequestDetailContent(ctx),
+			DetailContent:       detailContent,
+			InputContentPath:    inputPath,
+			OutputContentPath:   outputPath,
+			DetailContentPath:   detailPath,
 		})
 	})
 }
@@ -342,9 +362,9 @@ func (r *usageReporter) spillOutputBuilderToFileLocked() error {
 	return nil
 }
 
-func (r *usageReporter) finalizeContent() (string, string) {
+func (r *usageReporter) finalizeContent() (string, string, string, string) {
 	if r == nil {
-		return "", ""
+		return "", "", "", ""
 	}
 	r.contentMu.Lock()
 	defer r.contentMu.Unlock()
@@ -355,23 +375,85 @@ func (r *usageReporter) finalizeContent() (string, string) {
 		r.outputBuilder.Reset()
 	}
 	if r.outputFile != nil {
-		path := r.outputPath
 		if err := r.outputFile.Close(); err != nil {
 			log.Errorf("usage: close streaming output temp file: %v", err)
 		}
 		r.outputFile = nil
-		r.outputPath = ""
-		if data, err := os.ReadFile(path); err != nil {
-			log.Errorf("usage: read streaming output temp file: %v", err)
+	}
+	if r.outputPath == "" {
+		output, r.outputPath = deferLargeContent("cliproxy-usage-output-*", output)
+	} else if output != "" {
+		// Preserve the legacy ordering (direct content before streamed chunks)
+		// without loading the existing spool back into memory.
+		combined, err := os.CreateTemp("", "cliproxy-usage-output-combined-*")
+		if err != nil {
+			log.Errorf("usage: create combined output spool: %v", err)
 		} else {
-			output += string(data)
-		}
-		if path != "" {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.Warnf("usage: remove streaming output temp file: %v", err)
+			oldPath := r.outputPath
+			oldFile, errOpen := os.Open(oldPath)
+			if errOpen != nil {
+				_ = combined.Close()
+				_ = os.Remove(combined.Name())
+				log.Errorf("usage: open existing output spool: %v", errOpen)
+			} else {
+				_, errWrite := combined.WriteString(output)
+				if errWrite == nil {
+					_, errWrite = io.Copy(combined, oldFile)
+				}
+				_ = oldFile.Close()
+				if errClose := combined.Close(); errWrite == nil {
+					errWrite = errClose
+				}
+				if errWrite != nil {
+					_ = os.Remove(combined.Name())
+					log.Errorf("usage: combine output spool: %v", errWrite)
+				} else {
+					_ = os.Remove(oldPath)
+					r.outputPath = combined.Name()
+					output = ""
+				}
 			}
 		}
 	}
-	r.outputContent = output
-	return r.inputContent, r.outputContent
+
+	input := r.inputContent
+	inputPath := r.inputPath
+	r.inputContent = ""
+	r.inputPath = ""
+	r.outputContent = ""
+	outputPath := r.outputPath
+	r.outputPath = ""
+	return input, output, inputPath, outputPath
+}
+
+func (r *usageReporter) setInputContentLocked(content string) {
+	if r.inputPath != "" {
+		_ = os.Remove(r.inputPath)
+		r.inputPath = ""
+	}
+	r.inputContent, r.inputPath = deferLargeContent("cliproxy-usage-input-*", content)
+}
+
+func deferLargeContent(pattern, content string) (string, string) {
+	if len(content) <= usageReporterOutputMemoryLimit {
+		return content, ""
+	}
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		log.Errorf("usage: create deferred content file: %v", err)
+		return content, ""
+	}
+	path := file.Name()
+	if _, err = file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		log.Errorf("usage: write deferred content file: %v", err)
+		return content, ""
+	}
+	if err = file.Close(); err != nil {
+		_ = os.Remove(path)
+		log.Errorf("usage: close deferred content file: %v", err)
+		return content, ""
+	}
+	return "", path
 }

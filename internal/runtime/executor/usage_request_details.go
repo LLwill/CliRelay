@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/diagnostics"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -38,6 +39,38 @@ func apiKeyFromContext(ctx context.Context) string {
 	return ""
 }
 
+func usageRequestMetadata(ctx context.Context) (identifier, requestID string, responseStatus int) {
+	if ctx == nil {
+		return "", "", 0
+	}
+	requestID = logging.GetRequestID(ctx)
+	ginCtx, _ := ctx.Value(util.ContextKeyGin).(*gin.Context)
+	if ginCtx == nil {
+		return "", requestID, 0
+	}
+	if requestID == "" {
+		requestID = logging.GetGinRequestID(ginCtx)
+	}
+	path := ginCtx.FullPath()
+	method := ""
+	if ginCtx.Request != nil {
+		if path == "" && ginCtx.Request.URL != nil {
+			path = ginCtx.Request.URL.Path
+		}
+		method = ginCtx.Request.Method
+	}
+	if path != "" {
+		identifier = path
+		if method != "" {
+			identifier = method + " " + path
+		}
+	}
+	if ginCtx.Writer != nil {
+		responseStatus = ginCtx.Writer.Status()
+	}
+	return identifier, requestID, responseStatus
+}
+
 func buildRequestDetailContent(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -48,8 +81,8 @@ func buildRequestDetailContent(ctx context.Context) string {
 	}
 
 	req := ginCtx.Request
-	apiRequest, _ := ginCtx.Get(apiRequestKey)
-	apiResponse, _ := ginCtx.Get(apiResponseKey)
+	apiRequest := logging.APIRequestSnapshot(ginCtx)
+	apiResponse := logging.APIResponseSnapshot(ginCtx)
 	clientIP, clientIPSource := requestLogClientIP(ginCtx, req)
 
 	detail := map[string]any{

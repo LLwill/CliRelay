@@ -353,27 +353,11 @@ func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
 }
 
 func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
-	apiRequest, isExist := c.Get("API_REQUEST")
-	if !isExist {
-		return nil
-	}
-	data, ok := apiRequest.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
-	}
-	return data
+	return logging.APIRequestSnapshot(c)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
-	apiResponse, isExist := c.Get("API_RESPONSE")
-	if !isExist {
-		return nil
-	}
-	data, ok := apiResponse.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
-	}
-	return data
+	return logging.APIResponseSnapshot(c)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {

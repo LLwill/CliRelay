@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -26,6 +27,9 @@ type Record struct {
 	LatencyMs           int64
 	FirstTokenMs        int64
 	Failed              bool
+	APIIdentifier       string
+	RequestID           string
+	ResponseStatus      int
 	Detail              Detail
 
 	// Optional: request/response content for log detail viewer.
@@ -35,6 +39,14 @@ type Record struct {
 	InputContent  string
 	OutputContent string
 	DetailContent string
+
+	// Optional temp-file backed content. Large request/response bodies use these
+	// paths so the bounded manager queue retains small references instead of
+	// whole payload strings. Plugins must consume them synchronously; Manager
+	// removes the files after dispatch.
+	InputContentPath  string
+	OutputContentPath string
+	DetailContentPath string
 }
 
 // Detail holds the token usage breakdown.
@@ -55,7 +67,6 @@ type Plugin interface {
 }
 
 type queueItem struct {
-	ctx    context.Context
 	record Record
 }
 
@@ -65,10 +76,11 @@ type Manager struct {
 	stopOnce sync.Once
 	cancel   context.CancelFunc
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []queueItem
+	capacity int
+	closed   bool
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -76,7 +88,10 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	if buffer <= 0 {
+		buffer = 1
+	}
+	m := &Manager{capacity: buffer}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -123,7 +138,8 @@ func (m *Manager) Register(plugin Plugin) {
 }
 
 // Publish enqueues a usage record for processing. If no plugin is registered
-// the record will be discarded downstream.
+// the record will be discarded downstream. The original request context is not
+// retained in the asynchronous queue; required request metadata belongs in Record.
 func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
@@ -131,11 +147,15 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
+	for !m.closed && len(m.queue) >= m.capacity {
+		m.cond.Wait()
+	}
 	if m.closed {
 		m.mu.Unlock()
+		cleanupRecordTempFiles(record)
 		return
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	m.queue = append(m.queue, queueItem{record: record})
 	m.mu.Unlock()
 	m.cond.Signal()
 }
@@ -151,13 +171,16 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
+		m.cond.Broadcast()
 		m.mu.Unlock()
 		m.dispatch(item)
 	}
 }
 
 func (m *Manager) dispatch(item queueItem) {
+	defer cleanupRecordTempFiles(item.record)
 	m.pluginsMu.RLock()
 	plugins := make([]Plugin, len(m.plugins))
 	copy(plugins, m.plugins)
@@ -169,7 +192,16 @@ func (m *Manager) dispatch(item queueItem) {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		safeInvoke(plugin, context.Background(), item.record)
+	}
+}
+
+func cleanupRecordTempFiles(record Record) {
+	for _, path := range []string{record.InputContentPath, record.OutputContentPath, record.DetailContentPath} {
+		if path == "" {
+			continue
+		}
+		_ = os.Remove(path)
 	}
 }
 

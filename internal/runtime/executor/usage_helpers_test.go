@@ -95,17 +95,23 @@ func TestUsageReporterSpillsLargeStreamingOutputToTempFile(t *testing.T) {
 	}
 	tempPath := reporter.outputPath
 
-	_, output := reporter.finalizeContent()
+	_, output, _, outputPath := reporter.finalizeContent()
+	if output != "" {
+		t.Fatalf("expected large output to remain file-backed, got inline length=%d", len(output))
+	}
+	if outputPath != tempPath {
+		t.Fatalf("output path = %q, want %q", outputPath, tempPath)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read deferred output: %v", err)
+	}
 	expected := string(chunk) + "\n" + string(chunk) + "\n"
-	if output != expected {
-		t.Fatalf("unexpected output length/content: got=%d want=%d", len(output), len(expected))
+	if string(data) != expected {
+		t.Fatalf("unexpected output length/content: got=%d want=%d", len(data), len(expected))
 	}
-
-	if reporter.outputPath != "" {
-		t.Fatalf("expected outputPath to be cleared after finalizeContent")
-	}
-	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
-		t.Fatalf("expected temp file to be removed, stat err=%v", err)
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatalf("remove deferred output: %v", err)
 	}
 }
 
@@ -220,5 +226,63 @@ func TestFirstTokenLatencyMsFromContext(t *testing.T) {
 
 	if got := firstTokenLatencyMsFromContext(ctx, requestedAt); got != 183 {
 		t.Fatalf("firstTokenLatencyMsFromContext() = %d, want %d", got, 183)
+	}
+}
+
+func TestUsageReporterPreservesDirectContentBeforeSpilledChunks(t *testing.T) {
+	reporter := newUsageReporter(context.Background(), "provider", "model", "", nil)
+	chunk := bytes.Repeat([]byte("x"), usageReporterOutputMemoryLimit+1)
+	reporter.appendOutputChunk(chunk)
+	reporter.outputContent = "prefix\n"
+
+	_, inlineOutput, _, outputPath := reporter.finalizeContent()
+	if inlineOutput != "" || outputPath == "" {
+		t.Fatalf("inline=%d path=%q, want file-backed output", len(inlineOutput), outputPath)
+	}
+	t.Cleanup(func() { _ = os.Remove(outputPath) })
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.HasPrefix(data, []byte("prefix\n")) {
+		t.Fatalf("combined output does not preserve prefix ordering")
+	}
+	if !bytes.Contains(data, chunk[:1024]) {
+		t.Fatalf("combined output lost streamed chunk content")
+	}
+}
+
+func TestUsageReporterDefersLargeInputContent(t *testing.T) {
+	reporter := newUsageReporter(context.Background(), "provider", "model", "", nil)
+	input := strings.Repeat("i", usageReporterOutputMemoryLimit+1)
+	reporter.setInputContent(input)
+
+	inlineInput, _, inputPath, _ := reporter.finalizeContent()
+	if inlineInput != "" || inputPath == "" {
+		t.Fatalf("inline=%d path=%q, want file-backed input", len(inlineInput), inputPath)
+	}
+	t.Cleanup(func() { _ = os.Remove(inputPath) })
+	data, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != input {
+		t.Fatalf("deferred input content mismatch")
+	}
+}
+
+func TestUsageRequestMetadataSnapshotsRequestWithoutRetainingGinContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Status(http.StatusTooManyRequests)
+	ctx := context.WithValue(ginCtx.Request.Context(), util.ContextKeyGin, ginCtx)
+
+	identifier, _, status := usageRequestMetadata(ctx)
+	if identifier != "POST /v1/responses" {
+		t.Fatalf("identifier = %q", identifier)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
 	}
 }

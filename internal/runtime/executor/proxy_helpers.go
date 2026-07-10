@@ -86,11 +86,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	if httpClient.Transport == nil {
-		transport := util.NewDefaultTransport(cfg != nil && cfg.PreferIPv4)
-		httpClient.Transport = transport
-		if sdkCfg := cfgToSDKCfg(cfg); sdkCfg != nil {
-			util.ApplyTLSConfig(transport, sdkCfg)
-		}
+		httpClient.Transport = cachedDirectTransport(cfgToSDKCfg(cfg))
 	}
 
 	if proxyURL != "" {
