@@ -129,3 +129,16 @@ func TestFindCcSwitchImportConfigByRoutePath(t *testing.T) {
 		t.Fatalf("row.ModelMappings = %#v, want kimi-k2.6 mapping", row.ModelMappings)
 	}
 }
+
+func TestNormalizeCcSwitchModelMappingsClampsKnownCodexContext(t *testing.T) {
+	mappings := normalizeCcSwitchModelMappings([]CcSwitchModelMappingRow{
+		{RequestModel: "gpt-5.6-luna", TargetModel: "gpt-5.6-luna", ContextWindow: 2000000},
+		{RequestModel: "unknown-model", TargetModel: "unknown-upstream", ContextWindow: 2000000},
+	})
+	if got := mappings[0].ContextWindow; got != 1050000 {
+		t.Fatalf("known GPT-5.6 context = %d, want 1050000", got)
+	}
+	if got := mappings[1].ContextWindow; got != 2000000 {
+		t.Fatalf("unknown model context = %d, want 2000000", got)
+	}
+}

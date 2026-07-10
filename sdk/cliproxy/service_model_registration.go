@@ -187,13 +187,13 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = appendOAuthProviderModelConfigs(models, provider, authKind, listOAuthProviderModelConfigRows())
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("qwen")
 		models = applyExcludedModels(models, excluded)
 	case "xai":
-		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("xai")
-		models = applyExcludedModels(models, excluded)
+		models = s.fetchXAIRegistryModels(ctx, a, excluded)
 	case "iflow":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)
@@ -219,4 +219,16 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func (s *Service) refreshRegisteredModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, auth := range s.coreManager.List() {
+		s.registerModelsForAuth(ctx, auth)
+	}
 }

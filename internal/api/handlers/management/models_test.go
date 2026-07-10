@@ -110,6 +110,45 @@ func TestModelConfigHandlersCreateListAndDelete(t *testing.T) {
 	}
 }
 
+func TestModelConfigHandlersNotifyModelConfigMutation(t *testing.T) {
+	initManagementModelsTestDB(t)
+	h := NewHandler(&config.Config{}, "", nil)
+	notifications := 0
+	h.SetModelConfigMutatedHook(func() { notifications++ })
+
+	createBody := []byte(`{"id":"notify-model","owned_by":"codex","enabled":true}`)
+	createRec := performModelsRequest(http.MethodPost, "/model-configs", createBody, h.Models().PostModelConfig)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("PostModelConfig status = %d body = %s", createRec.Code, createRec.Body.String())
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications after create = %d, want 1", notifications)
+	}
+
+	updateBody := []byte(`{"id":"notify-model","owned_by":"codex","enabled":false}`)
+	updateRec := performModelsRequest(http.MethodPut, "/model-configs/notify-model", updateBody, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: "notify-model"}}
+		h.Models().PutModelConfig(c)
+	})
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("PutModelConfig status = %d body = %s", updateRec.Code, updateRec.Body.String())
+	}
+	if notifications != 2 {
+		t.Fatalf("notifications after update = %d, want 2", notifications)
+	}
+
+	deleteRec := performModelsRequest(http.MethodDelete, "/model-configs/notify-model", nil, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: "notify-model"}}
+		h.Models().DeleteModelConfig(c)
+	})
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("DeleteModelConfig status = %d body = %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if notifications != 3 {
+		t.Fatalf("notifications after delete = %d, want 3", notifications)
+	}
+}
+
 func TestModelConfigHandlersScopeFiltering(t *testing.T) {
 	initManagementModelsTestDB(t)
 	h := NewHandler(&config.Config{}, "", nil)

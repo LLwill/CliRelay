@@ -1,6 +1,10 @@
 package usage
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+)
 
 const CcSwitchCodexModelCatalogFilename = "cc-switch-model-catalog.json"
 
@@ -85,10 +89,11 @@ const ccSwitchCodexBaseInstructions = "You are Codex, a coding agent."
 
 type ccSwitchCodexCatalogModelSpec struct {
 	Model         string
+	TargetModel   string
 	ContextWindow int
 }
 
-var ccSwitchCodexSupportedReasoningLevels = []CcSwitchCodexReasoningLevel{
+var ccSwitchCodexFallbackReasoningLevels = []CcSwitchCodexReasoningLevel{
 	{Effort: "low", Description: "Fast responses with lighter reasoning"},
 	{Effort: "medium", Description: "Balances speed and reasoning depth for everyday tasks"},
 	{Effort: "high", Description: "Greater reasoning depth for complex problems"},
@@ -112,7 +117,8 @@ func BuildCcSwitchCodexModelCatalog(row CcSwitchImportConfigRow) *CcSwitchCodexM
 		if model != "" {
 			models = append(models, ccSwitchCodexCatalogModelSpec{
 				Model:         model,
-				ContextWindow: normalizeCcSwitchCodexContextWindow(mapping.ContextWindow),
+				TargetModel:   strings.TrimSpace(mapping.TargetModel),
+				ContextWindow: mapping.ContextWindow,
 			})
 		}
 	}
@@ -162,16 +168,69 @@ func AttachCcSwitchCodexModelCatalogs(rows []CcSwitchImportConfigRow) []CcSwitch
 	return out
 }
 
-func normalizeCcSwitchCodexContextWindow(value int) int {
-	if value <= 0 {
-		return ccSwitchCodexDefaultContextWindow
+func resolveCcSwitchCodexCapability(spec ccSwitchCodexCatalogModelSpec) (registry.CodexModelCapability, bool) {
+	if capability, ok := registry.GetCodexModelCapability(spec.Model); ok {
+		return capability, true
 	}
-	return value
+	return registry.GetCodexModelCapability(spec.TargetModel)
+}
+
+func resolveCcSwitchCodexContextWindows(spec ccSwitchCodexCatalogModelSpec) (int, int) {
+	capability, known := resolveCcSwitchCodexCapability(spec)
+	if !known {
+		contextWindow := spec.ContextWindow
+		if contextWindow <= 0 {
+			contextWindow = ccSwitchCodexDefaultContextWindow
+		}
+		return contextWindow, contextWindow
+	}
+
+	contextWindow := spec.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = capability.ContextWindow
+	}
+	if contextWindow > capability.MaxContextWindow {
+		contextWindow = capability.MaxContextWindow
+	}
+	return contextWindow, capability.MaxContextWindow
+}
+
+func ccSwitchCodexReasoningLevels(levels []string) []CcSwitchCodexReasoningLevel {
+	result := make([]CcSwitchCodexReasoningLevel, 0, len(levels))
+	for _, effort := range levels {
+		description := effort
+		switch effort {
+		case "low":
+			description = "Fast responses with lighter reasoning"
+		case "medium":
+			description = "Balances speed and reasoning depth for everyday tasks"
+		case "high":
+			description = "Greater reasoning depth for complex problems"
+		case "xhigh":
+			description = "Extra high reasoning depth for complex problems"
+		case "max":
+			description = "Maximum reasoning depth for the hardest problems"
+		case "ultra":
+			description = "Maximum reasoning with automatic task delegation"
+		}
+		result = append(result, CcSwitchCodexReasoningLevel{Effort: effort, Description: description})
+	}
+	return result
 }
 
 func buildCcSwitchCodexModelCatalogEntry(spec ccSwitchCodexCatalogModelSpec, priority int) CcSwitchCodexModelCatalogEntry {
 	model := strings.TrimSpace(spec.Model)
-	contextWindow := normalizeCcSwitchCodexContextWindow(spec.ContextWindow)
+	contextWindow, maxContextWindow := resolveCcSwitchCodexContextWindows(spec)
+	defaultReasoningLevel := "medium"
+	supportedReasoningLevels := append([]CcSwitchCodexReasoningLevel(nil), ccSwitchCodexFallbackReasoningLevels...)
+	displayName := model
+	description := model
+	if capability, ok := resolveCcSwitchCodexCapability(spec); ok {
+		defaultReasoningLevel = capability.DefaultReasoningLevel
+		supportedReasoningLevels = ccSwitchCodexReasoningLevels(capability.CatalogReasoningLevels)
+		displayName = capability.DisplayName
+		description = capability.Description
+	}
 	messages := CcSwitchCodexModelMessages{
 		InstructionsTemplate:          ccSwitchCodexBaseInstructions,
 		InstructionsVariables:         map[string]string{},
@@ -185,7 +244,7 @@ func buildCcSwitchCodexModelCatalogEntry(spec ccSwitchCodexCatalogModelSpec, pri
 		SupportsParallelToolCalls:     true,
 		SupportsImageDetailOriginal:   true,
 		ContextWindow:                 contextWindow,
-		MaxContextWindow:              contextWindow,
+		MaxContextWindow:              maxContextWindow,
 		EffectiveContextWindowPercent: 95,
 		ExperimentalSupportedTools:    []string{},
 		InputModalities:               []string{"text", "image"},
@@ -196,10 +255,10 @@ func buildCcSwitchCodexModelCatalogEntry(spec ccSwitchCodexCatalogModelSpec, pri
 	return CcSwitchCodexModelCatalogEntry{
 		Slug:                          model,
 		Model:                         model,
-		DisplayName:                   model,
-		Description:                   model,
-		DefaultReasoningLevel:         "medium",
-		SupportedReasoningLevels:      ccSwitchCodexSupportedReasoningLevels,
+		DisplayName:                   displayName,
+		Description:                   description,
+		DefaultReasoningLevel:         defaultReasoningLevel,
+		SupportedReasoningLevels:      supportedReasoningLevels,
 		ShellType:                     "shell_command",
 		Visibility:                    "list",
 		SupportedInAPI:                true,
@@ -220,7 +279,7 @@ func buildCcSwitchCodexModelCatalogEntry(spec ccSwitchCodexCatalogModelSpec, pri
 		SupportsParallelToolCalls:     true,
 		SupportsImageDetailOriginal:   true,
 		ContextWindow:                 contextWindow,
-		MaxContextWindow:              contextWindow,
+		MaxContextWindow:              maxContextWindow,
 		EffectiveContextWindowPercent: 95,
 		ExperimentalSupportedTools:    []string{},
 		InputModalities:               []string{"text", "image"},

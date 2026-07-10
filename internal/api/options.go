@@ -13,16 +13,17 @@ import (
 )
 
 type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	configMutatedCallback func(*config.Config)
+	extraMiddleware            []gin.HandlerFunc
+	engineConfigurator         func(*gin.Engine)
+	routerConfigurator         func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory       func(*config.Config, string) logging.RequestLogger
+	localPassword              string
+	keepAliveEnabled           bool
+	keepAliveTimeout           time.Duration
+	keepAliveOnTimeout         func()
+	postAuthHook               auth.PostAuthHook
+	configMutatedCallback      func(*config.Config)
+	modelConfigMutatedCallback func()
 }
 
 // ServerOption customises HTTP server construction.
@@ -93,5 +94,11 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 func WithConfigMutatedCallback(fn func(*config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configMutatedCallback = fn
+	}
+}
+
+func WithModelConfigMutatedCallback(fn func()) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.modelConfigMutatedCallback = fn
 	}
 }

@@ -197,7 +197,8 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 //   - "none" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "auto" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "8192" -> level="", ok=false (numeric, use ParseNumericSuffix)
-//   - "ultra" -> level="", ok=false (unknown level)
+//   - "max" -> level=LevelMax, ok=true
+//   - "ultra" -> level="", ok=false (Codex client mode, not a wire effort)
 func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 	if rawSuffix == "" {
 		return "", false
@@ -215,6 +216,8 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 		return LevelHigh, true
 	case "xhigh":
 		return LevelXHigh, true
+	case "max":
+		return LevelMax, true
 	default:
 		return "", false
 	}

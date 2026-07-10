@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -33,6 +34,30 @@ func initTestUsageDB(t *testing.T, cfg config.RequestLogStorageConfig) {
 	}
 	stopRequestLogMaintenance()
 	t.Cleanup(CloseDB)
+}
+
+func TestSQLiteDatabaseSizeBytesIncludesWALAndSHM(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	files := map[string]string{
+		dbPath:          "database",
+		dbPath + "-wal": "wal",
+		dbPath + "-shm": "shm",
+	}
+	var want int64
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		want += int64(len(content))
+	}
+
+	got, err := sqliteDatabaseSizeBytes(dbPath)
+	if err != nil {
+		t.Fatalf("sqliteDatabaseSizeBytes() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("sqliteDatabaseSizeBytes() = %d, want %d", got, want)
+	}
 }
 
 func TestCutoffStartUTCAtUsesProjectTimezoneForDayBoundaries(t *testing.T) {
@@ -1999,7 +2024,9 @@ func TestQueryStatsAndHeatmapCountSessionsFromDetails(t *testing.T) {
 		CleanupIntervalMinutes: 1440,
 	})
 
-	today := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	// Keep both samples inside the rolling query window instead of letting a
+	// hard-coded calendar date age out as the test suite advances.
+	today := CutoffStartUTC(1).Add(12 * time.Hour)
 	yesterday := today.AddDate(0, 0, -1)
 	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today, 10, 5, TokenStats{
 		InputTokens: 10, OutputTokens: 20, TotalTokens: 30,

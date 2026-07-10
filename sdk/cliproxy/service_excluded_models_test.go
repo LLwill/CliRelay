@@ -290,6 +290,106 @@ func TestRegisterModelsForAuth_AddsUserModelConfigsForOAuthProvider(t *testing.T
 	}
 }
 
+func TestRefreshRegisteredModels_AddsCodexOwnedModelConfigsForCodexOAuth(t *testing.T) {
+	usage.CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, internalconfig.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	const modelID = "gpt-codex-user-defined"
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:     modelID,
+		OwnedBy:     "codex",
+		Description: "User-defined Codex OAuth model",
+		Enabled:     true,
+		Source:      "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth-user-models",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.refreshRegisteredModels(context.Background())
+	if !hasModelID(registry.GetModelsForClient(auth.ID), modelID) {
+		t.Fatal("expected Codex-owned model config to be registered for Codex OAuth auth")
+	}
+
+	if err := usage.DeleteModelConfig(modelID); err != nil {
+		t.Fatalf("DeleteModelConfig() error = %v", err)
+	}
+	service.refreshRegisteredModels(context.Background())
+	if hasModelID(registry.GetModelsForClient(auth.ID), modelID) {
+		t.Fatal("expected deleted Codex-owned model config to be removed after registry refresh")
+	}
+}
+
+func TestRegisterModelsForAuth_DoesNotAddOpenAIOwnedModelConfigsForCodexOAuth(t *testing.T) {
+	usage.CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, internalconfig.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	const modelID = "openai-owned-not-codex"
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:     modelID,
+		OwnedBy:     "openai",
+		Description: "OpenAI model library entry",
+		Enabled:     true,
+		Source:      "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth-openai-owned-models",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+	if hasModelID(registry.GetModelsForClient(auth.ID), modelID) {
+		t.Fatal("did not expect OpenAI-owned model config to be registered as Codex OAuth model")
+	}
+}
+
 func TestRegisterModelsForAuth_ClaudeOAuthStaticMaxModelIsRouteableWithoutModelConfig(t *testing.T) {
 	usage.CloseDB()
 	dbPath := filepath.Join(t.TempDir(), "usage.db")

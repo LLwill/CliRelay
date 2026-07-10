@@ -102,6 +102,11 @@ func WithConfigMutatedCallback(fn func(*config.Config)) ServerOption {
 	return apisdkbridge.WithConfigMutatedCallback(fn)
 }
 
+// WithModelConfigMutatedCallback registers a callback invoked after management-side model catalog mutations.
+func WithModelConfigMutatedCallback(fn func()) ServerOption {
+	return apisdkbridge.WithModelConfigMutatedCallback(fn)
+}
+
 // WithKeepAliveEndpoint enables a keep-alive endpoint with the provided timeout and callback.
 func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption {
 	return apisdkbridge.WithKeepAliveEndpoint(timeout, onTimeout)

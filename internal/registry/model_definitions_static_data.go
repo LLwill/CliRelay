@@ -696,7 +696,7 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetOpenAIModels returns the standard OpenAI model definitions
 func GetOpenAIModels() []*ModelInfo {
-	return []*ModelInfo{
+	return append([]*ModelInfo{
 		{
 			ID:                  "gpt-5",
 			Object:              "model",
@@ -917,7 +917,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Description:         "Text-to-image generation model.",
 			SupportedParameters: []string{"prompt", "size", "n", "response_format"},
 		},
-	}
+	}, getGPT56ModelDefinitions()...)
 }
 
 func GetXAIModels() []*ModelInfo {

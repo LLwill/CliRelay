@@ -146,3 +146,12 @@ func TestParseSuffix_BracketSuffix(t *testing.T) {
 		})
 	}
 }
+
+func TestParseLevelSuffixMaxButNotUltra(t *testing.T) {
+	if level, ok := ParseLevelSuffix("max"); !ok || level != LevelMax {
+		t.Fatalf("ParseLevelSuffix(max) = (%q, %v), want (%q, true)", level, ok, LevelMax)
+	}
+	if level, ok := ParseLevelSuffix("ultra"); ok || level != "" {
+		t.Fatalf("ParseLevelSuffix(ultra) = (%q, %v), want (\"\", false)", level, ok)
+	}
+}
