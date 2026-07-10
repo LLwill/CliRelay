@@ -13,6 +13,7 @@ func registerManagementSettingsRoutes(group *gin.RouterGroup, h *managementhandl
 	group.GET("/update/check", h.CheckUpdate)
 	group.GET("/update/current", h.GetCurrentUpdateState)
 	group.GET("/update/progress", h.GetUpdateProgress)
+	group.GET("/update/events", h.StreamUpdateProgress)
 	group.POST("/update/apply", h.ApplyUpdate)
 	group.GET("/auto-update/enabled", h.GetAutoUpdateEnabled)
 	group.PUT("/auto-update/enabled", h.PutAutoUpdateEnabled)

@@ -1,132 +1,148 @@
-# PostgreSQL and Redis Runtime Data Stack
+# PostgreSQL / Redis Runtime and Legacy SQLite Import
 
-CliRelay now uses PostgreSQL 15+ as the runtime primary database. Redis 7+ is used only for cache, locks, limits, queues, and rebuildable runtime snapshots. Business facts such as API keys, routing, proxy pool, request logs, request log content, model config, pricing, identity fingerprints, and quota records must be recoverable from PostgreSQL.
+## Runtime boundary
 
-## Configure
+CliRelay runs exclusively on PostgreSQL 15+, Redis 7+, and Ent ORM.
 
-For Docker Compose, the bundled `docker-compose.yml` starts `clirelay-init`, `postgres:15-alpine`, and `redis:7-alpine`. A pre-existing `.env` is optional. On the first `docker compose up -d`, `clirelay-init` creates `.env`, preserves existing values, generates missing secrets, and creates `config.yaml` from `config.example.yaml` if it is missing. The application container then sources `.env` at startup and receives:
+- PostgreSQL is the only persistent runtime data source.
+- Redis stores cache, locks, rate limits, queues, and rebuildable state only.
+- SQLite is not opened during normal startup, health checks, blue-green deploys, or OTA updates.
+- The application entrypoint does not scan for `usage.db` and does not invoke the legacy import script.
+- Stack upgrades remove a stale `clirelay-migrate` service and legacy `CLIRELAY_SQLITE_AUTO_*` application environment entries, but do not delete SQLite files.
 
-- `CLIRELAY_POSTGRES_DSN`
-- `CLIRELAY_REDIS_ENABLE`
-- `CLIRELAY_REDIS_ADDR`
-- `CLIRELAY_REDIS_PASSWORD`
-- `CLIRELAY_REDIS_DB`
-
-For non-Compose deployments, set the same values in the environment or edit `postgres.dsn` and `redis.*` in `config.yaml`.
-
-For the native `relay.07230805.xyz` style deployment, prepare the local PostgreSQL/Redis stack with one reproducible script:
-
-```bash
-BASE_DIR=/opt/clirelay2 /opt/clirelay2/scripts/prepare-runtime-data-stack.sh
-```
-
-The default `up` action creates `/opt/clirelay2/runtime-data-stack/docker-compose.yml`, writes `/opt/clirelay2/runtime-data-stack/.env`, starts `postgres:15-alpine` and `redis:7-alpine`, waits for health checks, and verifies `psql`/`redis-cli`. PostgreSQL and Redis bind only to `127.0.0.1` by default.
-
-This preparation step does not write `/opt/clirelay2/.env`, does not restart CliRelay, does not import SQLite, and does not switch the running service to PostgreSQL/Redis.
-
-Only after local checks pass and the cutover is approved, activate the generated environment for CliRelay:
-
-```bash
-BASE_DIR=/opt/clirelay2 /opt/clirelay2/scripts/prepare-runtime-data-stack.sh activate-env
-```
-
-After `activate-env`, `scripts/deploy-blue-green.sh` can read `/opt/clirelay2/.env` and run the SQLite import during the approved deploy.
-
-To tear down an unneeded test stack without deleting data, run:
-
-```bash
-BASE_DIR=/opt/clirelay2 /opt/clirelay2/scripts/prepare-runtime-data-stack.sh down
-```
-
-To reset a disposable test stack and delete its generated PostgreSQL/Redis data directories:
-
-```bash
-CLIRELAY_RUNTIME_CONFIRM_RESET=YES_DELETE_CLIRELAY_RUNTIME_DATA \
-BASE_DIR=/tmp/clirelay2-test \
-./scripts/prepare-runtime-data-stack.sh reset
-```
-
-## Docker Compose Auto Migration
-
-For Docker Compose deployments, the default path is:
+For Docker Compose deployments:
 
 ```bash
 docker compose up -d
 ```
 
-Compose first runs `clirelay-init`, then starts PostgreSQL 15 and Redis 7, waits for their health checks, and finally the CliRelay entrypoint runs `scripts/migrate-sqlite-to-postgres.sh` before starting the API server. The script looks for a legacy SQLite database in these paths unless `CLIRELAY_SQLITE_PATH` is set:
+The stack starts `clirelay-init`, PostgreSQL, Redis, the application, and `clirelay-updater`. OTA state is stored by the updater in `.clirelay-updater-status.json` and streamed to the management API through SSE. SQLite inventory or import is never an OTA stage.
 
-- `/CLIProxyAPI/data/usage.db`
-- `/CLIProxyAPI/usage.db`
-- `/CLIProxyAPI/logs/usage.db`
-- `./data/usage.db`
-- `./usage.db`
-- `./logs/usage.db`
+## Who should run the legacy importer
 
-If no legacy SQLite file exists, the container starts normally with PostgreSQL. If a legacy SQLite file exists, the Docker Compose path provides `CLIRELAY_POSTGRES_DSN` automatically; non-Compose deployments must set it explicitly. The script runs read-only SQLite inventory, PostgreSQL import dry-run, then apply import by default. Set `CLIRELAY_SQLITE_AUTO_IMPORT=false` to stop after dry-run, or `CLIRELAY_SQLITE_AUTO_MIGRATE=false` to skip the startup migration hook.
+Run the importer only when all of the following are true:
 
-For old Docker deployments with a SQLite-only compose file, the online updater upgrades `docker-compose.yml` and `.env` first, adding `clirelay-init`, PostgreSQL, Redis, and generated defaults, then runs the full compose update. If the old deployment mounted files in a way that prevents the updater from writing them, replace `docker-compose.yml` with the latest repository version and run `docker compose up -d` once.
+1. The deployment originated from a SQLite-based CliRelay release.
+2. Historical data in the old `usage.db` must be retained.
+3. PostgreSQL is already provisioned and `CLIRELAY_POSTGRES_DSN` points to the intended target database.
+4. The original SQLite file has been backed up and is no longer being written by the old release.
 
-SQLite is never deleted, moved, or written by this migration path. PostgreSQL records a source fingerprint in `sqlite_import_runs` after a successful apply. Repeated container starts skip an already imported SQLite source, and PostgreSQL advisory locking ensures concurrent starts do not import the same source twice.
+Fresh installations and deployments already running on PostgreSQL must not run the importer.
 
-If migration fails, the container exits instead of starting against an empty PostgreSQL database.
+## Preserved migration tooling
 
-## Non-Docker Migration Script
+The following compatibility tools remain available:
 
-For non-Docker deployments, build or download the new CliRelay binary, set `CLIRELAY_POSTGRES_DSN`, then run:
+- `scripts/migrate-sqlite-to-postgres.sh`
+- `-sqlite-dry-run`
+- `-sqlite-import`
+- `-sqlite-import-dry-run=false`
+
+They are manual tools and are not called by the application entrypoint or updater.
+
+The script performs these operations in order:
+
+1. Read-only SQLite inventory.
+2. PostgreSQL import dry-run.
+3. Apply import, unless `CLIRELAY_SQLITE_AUTO_IMPORT=false` is set.
+
+It never deletes, moves, or writes the SQLite source. PostgreSQL records an import fingerprint in `sqlite_import_runs`, uses an advisory lock to serialize imports, and skips a source that has already been applied successfully.
+
+## Non-Docker import
 
 ```bash
-CLIRELAY_BIN=/opt/clirelay2/cli-proxy-api-new \
+CLIRELAY_BIN=/opt/clirelay2/clirelay2 \
 CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
 ./scripts/migrate-sqlite-to-postgres.sh /opt/clirelay2/usage.db
 ```
 
-The same script performs inventory, dry-run, apply, idempotency marking, and leaves SQLite in place.
+To stop after inventory and PostgreSQL dry-run:
 
-## Deploy Gate
+```bash
+CLIRELAY_SQLITE_AUTO_IMPORT=false \
+CLIRELAY_BIN=/opt/clirelay2/clirelay2 \
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./scripts/migrate-sqlite-to-postgres.sh /opt/clirelay2/usage.db
+```
 
-Pushes to `dev` build the Linux binary but do not deploy to the server unless repository variable `CLIRELAY_DEV_AUTO_DEPLOY` is set to `true`. Prefer leaving it disabled for this migration and running the deploy workflow manually after PostgreSQL, Redis, SQLite import dry-run/apply, and row-count/checksum checks are complete.
+## Docker Compose import
 
-The blue-green deploy script refuses to proceed unless `postgres.dsn` or `CLIRELAY_POSTGRES_DSN` is configured. If Redis is enabled, it also requires `redis.addr` or `CLIRELAY_REDIS_ADDR`.
+Start the PostgreSQL and Redis services first:
 
-## Inspect Legacy SQLite
+```bash
+docker compose up -d postgres redis
+```
 
-Run the read-only inventory before importing any old `usage.db`:
+Mount the old SQLite file read-only into a one-off application container:
+
+```bash
+docker compose run --rm --no-deps \
+  -e CLIRELAY_BIN=/CLIProxyAPI/CLIProxyAPI \
+  -v /absolute/path/to/usage.db:/migration/usage.db:ro \
+  cli-proxy-api \
+  /usr/local/bin/migrate-sqlite-to-postgres.sh /migration/usage.db
+```
+
+Dry-run only:
+
+```bash
+docker compose run --rm --no-deps \
+  -e CLIRELAY_BIN=/CLIProxyAPI/CLIProxyAPI \
+  -e CLIRELAY_SQLITE_AUTO_IMPORT=false \
+  -v /absolute/path/to/usage.db:/migration/usage.db:ro \
+  cli-proxy-api \
+  /usr/local/bin/migrate-sqlite-to-postgres.sh /migration/usage.db
+```
+
+## Separate inventory and apply commands
 
 ```bash
 ./cli-proxy-api -sqlite-dry-run /path/to/usage.db
-```
 
-The command opens SQLite read-only and prints table names, columns, row counts, numeric ID ranges, time ranges, checksums, and `dry_run_only: true`. It does not print row contents.
-
-Run the import dry-run against PostgreSQL before applying:
-
-```bash
 CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
 ./cli-proxy-api -sqlite-import /path/to/usage.db
-```
 
-The import command runs PostgreSQL migrations, compares source/target columns, row counts, and checksums, and reports planned inserts without writing by default. Apply only after the report is reviewed:
-
-```bash
 CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
 ./cli-proxy-api -sqlite-import /path/to/usage.db -sqlite-import-dry-run=false
 ```
 
-The apply path writes in batches, uses `ON CONFLICT DO NOTHING`, and resets PostgreSQL identity sequences for imported tables with generated IDs.
+Inventory and dry-run output should be reviewed for table coverage, source and target columns, row counts, ID/time ranges, checksums, and planned inserts before apply.
 
-## Validate PostgreSQL
+## Old Compose and updater transition
 
-Run Ent codegen and tests:
+For a SQLite-only Docker deployment:
+
+1. Back up `usage.db`, `docker-compose.yml`, `.env`, and PostgreSQL data if it already exists.
+2. Replace `docker-compose.yml` with the current repository version.
+3. Start the runtime dependencies and updater:
+
+   ```bash
+   docker compose up -d postgres redis clirelay-updater
+   ```
+
+4. Run the manual SQLite import if historical data is required.
+5. Start or recreate the application service.
+
+An updater sidecar from a release that predates the SSE protocol must be recreated once:
 
 ```bash
-rtk go generate ./internal/storage/postgres/ent
-rtk go test ./internal/storage/postgres/... ./internal/cmd -count=1
-rtk go test ./internal/usage -count=1
+docker compose up -d --force-recreate clirelay-updater
+```
+
+After that transition, the management panel receives real updater snapshots and can recover after API-container restarts or temporary SSE disconnects.
+
+## Validation
+
+Run the repository tests:
+
+```bash
+rtk go test ./cmd/updater -count=1
+rtk go test ./internal/management/updateflow ./internal/api/handlers/management -count=1
+rtk go test ./internal/storage/postgres/... ./internal/usage -count=1
 rtk go test ./...
 ```
 
-With PostgreSQL 15+ and Redis 7+ available:
+With integration services available:
 
 ```bash
 CLIRELAY_POSTGRES_TEST_DSN='postgres://cliproxy:cliproxy@127.0.0.1:55432/cliproxy?sslmode=disable' \
@@ -137,6 +153,4 @@ CLIRELAY_POSTGRES_TEST_DSN='postgres://cliproxy:cliproxy@127.0.0.1:55432/cliprox
 rtk go test ./internal/storage/postgres/sqliteinventory -run TestImportSQLiteDryRunAndApply -count=1 -v
 ```
 
-## Rollback Boundary
-
-Keep the original SQLite file as a read-only backup until row counts, ID/time ranges, checksums, key CRUD, management queries, request log content, cache fallback, and quota/identity paths have been verified against PostgreSQL. Do not run the migrated service against SQLite as a runtime primary database.
+Keep the original SQLite file as a read-only backup until PostgreSQL row counts, checksums, key CRUD paths, management queries, request logs, quota state, and identity data have been verified.

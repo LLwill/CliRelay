@@ -589,6 +589,7 @@ services:
       CLIRELAY_ENV_FILE: ${CLIRELAY_INSTALL_DIR}/.env
       CLIRELAY_COMPOSE_PROJECT_NAME: ${CLIRELAY_COMPOSE_PROJECT_NAME}
       CLIRELAY_TARGET_SERVICE: ${CLIRELAY_TARGET_SERVICE}
+      CLIRELAY_UPDATER_STATE_FILE: ${CLIRELAY_INSTALL_DIR}/.clirelay-updater-status.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:${CLIRELAY_INSTALL_DIR}

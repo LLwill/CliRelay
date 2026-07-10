@@ -34,10 +34,11 @@ var (
 			return releaseInfo{}, err
 		}
 		return releaseInfo{
-			TagName: info.TagName,
-			Name:    info.Name,
-			Body:    info.Body,
-			HTMLURL: info.HTMLURL,
+			TagName:     info.TagName,
+			Name:        info.Name,
+			Body:        info.Body,
+			HTMLURL:     info.HTMLURL,
+			PublishedAt: info.PublishedAt,
 		}, nil
 	}
 	fetchLatestSuccessfulWorkflowRunForUpdateCheck = managementupdate.FetchLatestSuccessfulWorkflowRun

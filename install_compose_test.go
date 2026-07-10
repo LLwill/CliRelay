@@ -69,6 +69,7 @@ func TestInstallComposeMirrorsDeploymentFilesAtHostPathInUpdater(t *testing.T) {
 	for _, want := range []string{
 		"CLIRELAY_COMPOSE_FILE: ${CLIRELAY_INSTALL_DIR}/docker-compose.yml",
 		"CLIRELAY_ENV_FILE: ${CLIRELAY_INSTALL_DIR}/.env",
+		"CLIRELAY_UPDATER_STATE_FILE: ${CLIRELAY_INSTALL_DIR}/.clirelay-updater-status.json",
 		".:${CLIRELAY_INSTALL_DIR}",
 	} {
 		if !strings.Contains(content, want) {

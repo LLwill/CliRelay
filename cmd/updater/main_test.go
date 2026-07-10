@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -460,69 +461,132 @@ func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 	close(releaseRunner)
 }
 
-func TestUpdaterStatusParsesSQLiteMigrationProgress(t *testing.T) {
+func TestUpdaterEventsStreamsInitialAndChangedSnapshots(t *testing.T) {
 	server := newUpdaterServer(updaterConfig{Token: "secret"})
-	runID := server.startUpdate("cli-proxy-api", updateRequest{})
+	httpServer := httptest.NewServer(http.HandlerFunc(server.handleEvents))
+	t.Cleanup(httpServer.Close)
 
-	reporter := updaterRunReporter{server: server, runID: runID}
-	reporter.Stage("migrating", "checking legacy SQLite migration before service restart")
-	reporter.Log("stderr", "clirelay sqlite migration: legacy SQLite found at /CLIProxyAPI/data/usage.db")
-	reporter.Log("stderr", "clirelay sqlite migration: applying SQLite import into PostgreSQL")
-	reporter.Log("stderr", "clirelay-migrate  | sqlite import progress: table 16/17 request_logs")
-	reporter.Log("stderr", "clirelay-migrate  | sqlite import progress: table request_logs inserted_rows=2 target_rows=167648")
-
-	payload := server.snapshot()
-	if payload.Stage != "migrating" {
-		t.Fatalf("Stage = %q, want migrating", payload.Stage)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL, nil)
+	if err != nil {
+		t.Fatalf("create events request: %v", err)
 	}
-	if payload.ProgressPercent < 84 || payload.ProgressPercent >= 86 {
-		t.Fatalf("ProgressPercent = %.2f, want row-based progress inside table 16/17", payload.ProgressPercent)
+	setUpdaterAuth(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
 	}
-	if payload.Migration == nil {
-		t.Fatal("Migration = nil, want migration detail")
-	}
-	if payload.Migration.TargetDatabase != "PostgreSQL" {
-		t.Fatalf("TargetDatabase = %q, want PostgreSQL", payload.Migration.TargetDatabase)
-	}
-	if payload.Migration.Phase != "applying" {
-		t.Fatalf("Phase = %q, want applying", payload.Migration.Phase)
-	}
-	if payload.Migration.Table != "request_logs" || payload.Migration.TableIndex != 16 || payload.Migration.TableTotal != 17 {
-		t.Fatalf("Migration table = %+v, want request_logs 16/17", payload.Migration)
-	}
-	if payload.Migration.InsertedRows != 2 || payload.Migration.TargetRows != 167648 {
-		t.Fatalf("Migration rows = %+v, want inserted/target rows", payload.Migration)
+	defer resp.Body.Close()
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q", contentType)
 	}
 
-	reporter.Log("stderr", "clirelay-migrate  | sqlite import progress: table request_logs inserted_rows=167648 target_rows=167648")
-	payload = server.snapshot()
-	if payload.ProgressPercent <= 86 || payload.ProgressPercent >= 89 {
-		t.Fatalf("ProgressPercent = %.2f, want row progress near completed table 16/17", payload.ProgressPercent)
+	scanner := bufio.NewScanner(resp.Body)
+	readStatus := func() updateStatusResponse {
+		t.Helper()
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var status updateStatusResponse
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &status); err != nil {
+				t.Fatalf("decode SSE status: %v", err)
+			}
+			return status
+		}
+		t.Fatalf("events stream ended: %v", scanner.Err())
+		return updateStatusResponse{}
+	}
+
+	if initial := readStatus(); initial.Status != "idle" {
+		t.Fatalf("initial status = %q, want idle", initial.Status)
+	}
+	runID, started := server.startUpdate("clirelay", updateRequest{Version: "main-new"})
+	if !started {
+		t.Fatal("startUpdate returned started=false")
+	}
+	changed := readStatus()
+	if changed.RunID != runID || changed.Status != "running" || changed.TargetVersion != "main-new" {
+		t.Fatalf("changed SSE status = %+v", changed)
 	}
 }
 
-func TestUpdaterStatusMarksSQLiteMigrationSkipped(t *testing.T) {
+func TestUpdaterRestoresInterruptedRunAsFailed(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "updater-status.json")
+	server := newUpdaterServer(updaterConfig{Token: "secret", StateFile: stateFile})
+	runID, started := server.startUpdate("clirelay", updateRequest{Version: "main-new"})
+	if !started {
+		t.Fatal("startUpdate returned started=false")
+	}
+
+	restored := newUpdaterServer(updaterConfig{Token: "secret", StateFile: stateFile})
+	status := restored.snapshot()
+	if status.RunID != runID || status.Status != "failed" || status.MessageCode != "updater_restarted" {
+		t.Fatalf("restored status = %+v", status)
+	}
+	if status.FinishedAt == "" {
+		t.Fatal("restored interrupted run must have finished_at")
+	}
+}
+
+func TestUpdaterStatusReportsActualStepProgress(t *testing.T) {
 	server := newUpdaterServer(updaterConfig{Token: "secret"})
-	runID := server.startUpdate("cli-proxy-api", updateRequest{})
+	runID, started := server.startUpdate("cli-proxy-api", updateRequest{
+		CurrentVersion: "main-old",
+		Version:        "main-new",
+		ReleaseName:    "CliRelay v0.5.0",
+		ReleaseNotes:   "latest changes",
+	})
+	if !started {
+		t.Fatal("startUpdate returned started=false")
+	}
 
 	reporter := updaterRunReporter{server: server, runID: runID}
-	reporter.Stage("migrating", "checking legacy SQLite migration before service restart")
-	reporter.Log("stderr", "clirelay sqlite migration: disabled by CLIRELAY_SQLITE_AUTO_MIGRATE")
-	reporter.Stage("migrating", "legacy SQLite migration check finished before service restart")
+	reporter.Progress("pulling", "pulling_target_image", "pulling target image", 2, 5)
 
 	payload := server.snapshot()
-	if payload.Message != "legacy SQLite migration skipped because auto-migration is disabled" {
-		t.Fatalf("Message = %q, want disabled skip message", payload.Message)
+	if payload.Stage != "pulling" || payload.MessageCode != "pulling_target_image" {
+		t.Fatalf("status = %+v, want pulling updater progress", payload)
 	}
-	if payload.Migration == nil {
-		t.Fatal("Migration = nil, want skipped migration detail")
+	if payload.ProgressCurrent != 2 || payload.ProgressTotal != 5 || payload.ProgressPercent != 40 {
+		t.Fatalf("progress = %d/%d %.2f, want 2/5 40", payload.ProgressCurrent, payload.ProgressTotal, payload.ProgressPercent)
 	}
-	if payload.Migration.Phase != "skipped" || payload.Migration.SkipReason != "disabled" {
-		t.Fatalf("Migration = %+v, want skipped disabled", payload.Migration)
+	if payload.CurrentVersion != "main-old" || payload.TargetVersion != "main-new" {
+		t.Fatalf("version metadata = %q -> %q", payload.CurrentVersion, payload.TargetVersion)
 	}
-	if payload.ProgressPercent < 88 {
-		t.Fatalf("ProgressPercent = %.2f, want skip progress near restart", payload.ProgressPercent)
+	if payload.ReleaseName != "CliRelay v0.5.0" || payload.ReleaseNotes != "latest changes" {
+		t.Fatalf("release metadata = %+v", payload)
 	}
+}
+
+func TestUpdaterRejectsConcurrentUpdate(t *testing.T) {
+	release := make(chan struct{})
+	server := newUpdaterServer(updaterConfig{
+		Token: "secret",
+		Runner: func(_ context.Context, _ string, _ string, _ string, _ string, _ updateReporter) error {
+			<-release
+			return nil
+		},
+	})
+
+	first := httptest.NewRequest(http.MethodPost, "/v1/update", strings.NewReader(`{"service":"clirelay"}`))
+	setUpdaterAuth(first)
+	firstRec := httptest.NewRecorder()
+	server.handleUpdate(firstRec, first)
+	if firstRec.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	second := httptest.NewRequest(http.MethodPost, "/v1/update", strings.NewReader(`{"service":"clirelay"}`))
+	setUpdaterAuth(second)
+	secondRec := httptest.NewRecorder()
+	server.handleUpdate(secondRec, second)
+	if secondRec.Code != http.StatusConflict {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusConflict)
+	}
+	close(release)
 }
 
 func TestUpdaterFailsWhenComposePullSkipsTargetService(t *testing.T) {
@@ -636,7 +700,7 @@ func TestRunComposeUpdateRecreatesOnlyTargetService(t *testing.T) {
 	want := []string{
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " pull clirelay",
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d postgres redis",
-		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans clirelay",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans --wait --wait-timeout 120 clirelay",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose commands = %#v, want %#v", got, want)
@@ -674,7 +738,7 @@ func TestRunComposeUpdateUsesEnvFileNextToComposeWhenUnset(t *testing.T) {
 	want := []string{
 		"compose --project-name cliproxy --env-file " + inferredEnvPath + " -f " + composePath + " pull clirelay",
 		"compose --project-name cliproxy --env-file " + inferredEnvPath + " -f " + composePath + " up -d postgres redis",
-		"compose --project-name cliproxy --env-file " + inferredEnvPath + " -f " + composePath + " up -d --no-deps --remove-orphans clirelay",
+		"compose --project-name cliproxy --env-file " + inferredEnvPath + " -f " + composePath + " up -d --no-deps --remove-orphans --wait --wait-timeout 120 clirelay",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose commands = %#v, want %#v", got, want)
@@ -754,7 +818,7 @@ func TestRunComposeUpdateUpgradesLegacySQLiteComposeWithRuntimeStack(t *testing.
 	want := []string{
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " pull clirelay",
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d postgres redis",
-		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans clirelay",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans --wait --wait-timeout 120 clirelay",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose commands = %#v, want %#v", got, want)
@@ -853,8 +917,8 @@ func TestRunComposeUpdateBootstrapsProductionLegacySQLiteStack(t *testing.T) {
 	if targetEnv["GIN_MODE"] != "release" {
 		t.Fatalf("GIN_MODE = %#v, want release", targetEnv["GIN_MODE"])
 	}
-	if targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"] != "false" {
-		t.Fatalf("target CLIRELAY_SQLITE_AUTO_MIGRATE = %#v, want false", targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"])
+	if _, ok := targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"]; ok {
+		t.Fatalf("target environment still contains legacy SQLite startup hook: %#v", targetEnv)
 	}
 	updater, ok := stringMap(services["clirelay-updater"])
 	if !ok {
@@ -896,7 +960,7 @@ func TestRunComposeUpdateBootstrapsProductionLegacySQLiteStack(t *testing.T) {
 	want := []string{
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " pull cli-proxy-api",
 		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d postgres redis",
-		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans cli-proxy-api",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans --wait --wait-timeout 120 cli-proxy-api",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose commands = %#v, want %#v", got, want)
@@ -944,9 +1008,6 @@ services:
 		if _, ok := env[forbidden]; ok {
 			t.Fatalf("environment still contains generated runtime key %s: %#v", forbidden, env)
 		}
-	}
-	if env["CLIRELAY_SQLITE_AUTO_MIGRATE"] != "false" {
-		t.Fatalf("clirelay must skip startup SQLite migration, environment = %#v", env)
 	}
 	if got := clirelay["entrypoint"]; got == nil {
 		t.Fatalf("clirelay service missing source-env entrypoint:\n%s", upgraded)

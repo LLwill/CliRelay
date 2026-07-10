@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strings"
 
@@ -71,6 +72,38 @@ func (h *Handler) GetUpdateProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, progress)
 }
 
+func (h *Handler) StreamUpdateProgress(c *gin.Context) {
+	upstream, err := h.updateService().OpenProgressStream(c.Request.Context(), c.GetHeader("Last-Event-ID"))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "update_events_failed", "message": err.Error()})
+		return
+	}
+	defer upstream.Body.Close()
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	buffer := make([]byte, 4096)
+	for {
+		n, readErr := upstream.Body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := c.Writer.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+			c.Writer.Flush()
+		}
+		if readErr != nil {
+			if readErr != io.EOF && c.Request.Context().Err() == nil {
+				_ = c.Error(readErr)
+			}
+			return
+		}
+	}
+}
+
 func (h *Handler) ApplyUpdate(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config_unavailable"})
@@ -86,6 +119,14 @@ func (h *Handler) ApplyUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "update_check_failed", "message": err.Error()})
 		return
 	}
+	if check.UpdateAvailable && !check.UpdaterAvailable {
+		message := strings.TrimSpace(check.UpdaterHealthMessage)
+		if message == "" {
+			message = "updater is unavailable"
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "updater_unavailable", "message": message})
+		return
+	}
 	if !check.UpdateAvailable {
 		message := strings.TrimSpace(check.Message)
 		if message == "" {
@@ -95,7 +136,8 @@ func (h *Handler) ApplyUpdate(c *gin.Context) {
 		return
 	}
 
-	if err := h.updateService().TriggerUpdate(c.Request.Context(), check); err != nil {
+	trigger, err := h.updateService().TriggerUpdate(c.Request.Context(), check)
+	if err != nil {
 		msg := strings.TrimSpace(err.Error())
 		switch {
 		case strings.HasPrefix(msg, "marshal_failed:"):
@@ -106,13 +148,15 @@ func (h *Handler) ApplyUpdate(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "updater_unreachable", "message": strings.TrimSpace(strings.TrimPrefix(msg, "updater_unreachable:"))})
 		case strings.HasPrefix(msg, "updater_failed:"):
 			c.JSON(http.StatusBadGateway, gin.H{"error": "updater_failed", "message": strings.TrimSpace(strings.TrimPrefix(msg, "updater_failed:"))})
+		case strings.HasPrefix(msg, "updater_response_invalid:"):
+			c.JSON(http.StatusBadGateway, gin.H{"error": "updater_response_invalid", "message": strings.TrimSpace(strings.TrimPrefix(msg, "updater_response_invalid:"))})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "update_apply_failed", "message": msg})
 		}
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "target": check})
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "run_id": trigger.RunID, "target": check})
 }
 
 func (h *Handler) buildUpdateCheck(ctx context.Context) (*updateCheckResponse, error) {
@@ -155,10 +199,11 @@ func (h *Handler) updateService() *managementupdate.Service {
 				return managementupdate.ReleaseInfo{}, err
 			}
 			return managementupdate.ReleaseInfo{
-				TagName: info.TagName,
-				Name:    info.Name,
-				Body:    info.Body,
-				HTMLURL: info.HTMLURL,
+				TagName:     info.TagName,
+				Name:        info.Name,
+				Body:        info.Body,
+				HTMLURL:     info.HTMLURL,
+				PublishedAt: info.PublishedAt,
 			}, nil
 		},
 		FetchSuccessfulWorkflowRun: fetchLatestSuccessfulWorkflowRunForUpdateCheck,

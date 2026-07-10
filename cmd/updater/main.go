@@ -41,6 +41,7 @@ type composeRunner func(ctx context.Context, composeFile string, envFile string,
 
 type updateReporter interface {
 	Stage(stage string, message string)
+	Progress(stage string, messageCode string, message string, current int, total int)
 	Log(stream string, message string)
 }
 
@@ -53,6 +54,7 @@ type updaterConfig struct {
 	DefaultService string
 	Runner         composeRunner
 	Context        context.Context
+	StateFile      string
 }
 
 type updaterServer struct {
@@ -68,6 +70,8 @@ type updaterServer struct {
 	pullSkipped    bool
 	pullSkipLog    string
 	ctx            context.Context
+	stateFile      string
+	subscribers    map[chan updateStatusResponse]struct{}
 }
 
 type updateLogEntry struct {
@@ -77,36 +81,61 @@ type updateLogEntry struct {
 }
 
 type updateStatusResponse struct {
-	Status          string           `json:"status"`
-	Stage           string           `json:"stage"`
-	Message         string           `json:"message,omitempty"`
-	ProgressPercent float64          `json:"progress_percent,omitempty"`
-	Migration       *migrationStatus `json:"migration,omitempty"`
-	Service         string           `json:"service,omitempty"`
-	TargetImage     string           `json:"target_image,omitempty"`
-	TargetTag       string           `json:"target_tag,omitempty"`
-	TargetVersion   string           `json:"target_version,omitempty"`
-	TargetCommit    string           `json:"target_commit,omitempty"`
-	TargetUIVersion string           `json:"target_ui_version,omitempty"`
-	TargetUICommit  string           `json:"target_ui_commit,omitempty"`
-	TargetChannel   string           `json:"target_channel,omitempty"`
-	StartedAt       string           `json:"started_at,omitempty"`
-	UpdatedAt       string           `json:"updated_at,omitempty"`
-	FinishedAt      string           `json:"finished_at,omitempty"`
-	Logs            []updateLogEntry `json:"logs,omitempty"`
+	RunID              uint64           `json:"run_id,omitempty"`
+	EventID            uint64           `json:"event_id,omitempty"`
+	Status             string           `json:"status"`
+	Stage              string           `json:"stage"`
+	MessageCode        string           `json:"message_code,omitempty"`
+	Message            string           `json:"message,omitempty"`
+	ProgressPercent    float64          `json:"progress_percent,omitempty"`
+	ProgressCurrent    int              `json:"progress_current,omitempty"`
+	ProgressTotal      int              `json:"progress_total,omitempty"`
+	ProgressUnit       string           `json:"progress_unit,omitempty"`
+	Service            string           `json:"service,omitempty"`
+	CurrentVersion     string           `json:"current_version,omitempty"`
+	CurrentCommit      string           `json:"current_commit,omitempty"`
+	CurrentUIVersion   string           `json:"current_ui_version,omitempty"`
+	CurrentUICommit    string           `json:"current_ui_commit,omitempty"`
+	TargetImage        string           `json:"target_image,omitempty"`
+	TargetTag          string           `json:"target_tag,omitempty"`
+	TargetVersion      string           `json:"target_version,omitempty"`
+	TargetCommit       string           `json:"target_commit,omitempty"`
+	TargetCommitURL    string           `json:"target_commit_url,omitempty"`
+	TargetUIVersion    string           `json:"target_ui_version,omitempty"`
+	TargetUICommit     string           `json:"target_ui_commit,omitempty"`
+	TargetUICommitURL  string           `json:"target_ui_commit_url,omitempty"`
+	TargetChannel      string           `json:"target_channel,omitempty"`
+	ReleaseName        string           `json:"release_name,omitempty"`
+	ReleaseTag         string           `json:"release_tag,omitempty"`
+	ReleaseNotes       string           `json:"release_notes,omitempty"`
+	ReleaseURL         string           `json:"release_url,omitempty"`
+	ReleasePublishedAt string           `json:"release_published_at,omitempty"`
+	StartedAt          string           `json:"started_at,omitempty"`
+	UpdatedAt          string           `json:"updated_at,omitempty"`
+	FinishedAt         string           `json:"finished_at,omitempty"`
+	Logs               []updateLogEntry `json:"logs,omitempty"`
 }
-
 type updateRequest struct {
-	Service   string `json:"service"`
-	Image     string `json:"image"`
-	Tag       string `json:"tag"`
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	UIVersion string `json:"ui_version"`
-	UICommit  string `json:"ui_commit"`
-	Channel   string `json:"channel"`
+	Service            string `json:"service"`
+	Image              string `json:"image"`
+	Tag                string `json:"tag"`
+	CurrentVersion     string `json:"current_version"`
+	CurrentCommit      string `json:"current_commit"`
+	CurrentUIVersion   string `json:"current_ui_version"`
+	CurrentUICommit    string `json:"current_ui_commit"`
+	Version            string `json:"version"`
+	Commit             string `json:"commit"`
+	CommitURL          string `json:"commit_url"`
+	UIVersion          string `json:"ui_version"`
+	UICommit           string `json:"ui_commit"`
+	UICommitURL        string `json:"ui_commit_url"`
+	Channel            string `json:"channel"`
+	ReleaseName        string `json:"release_name"`
+	ReleaseTag         string `json:"release_tag"`
+	ReleaseNotes       string `json:"release_notes"`
+	ReleaseURL         string `json:"release_url"`
+	ReleasePublishedAt string `json:"release_published_at"`
 }
-
 type dockerMount struct {
 	Type        string `json:"Type"`
 	Source      string `json:"Source"`
@@ -136,6 +165,7 @@ func updaterConfigFromEnv() updaterConfig {
 		ProjectName:    strings.TrimSpace(os.Getenv("CLIRELAY_COMPOSE_PROJECT_NAME")),
 		DefaultService: envOrDefault("CLIRELAY_TARGET_SERVICE", defaultTargetService),
 		Runner:         runComposeUpdate,
+		StateFile:      strings.TrimSpace(os.Getenv("CLIRELAY_UPDATER_STATE_FILE")),
 	}
 }
 
@@ -161,6 +191,7 @@ func serveUpdater(ctx context.Context, cfg updaterConfig, listener net.Listener)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", server.handleHealth)
 	mux.HandleFunc("/v1/status", server.handleStatus)
+	mux.HandleFunc("/v1/events", server.handleEvents)
 	mux.HandleFunc("/v1/update", server.handleUpdate)
 
 	httpServer := &http.Server{
@@ -203,7 +234,7 @@ func newUpdaterServer(cfg updaterConfig) *updaterServer {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &updaterServer{
+	server := &updaterServer{
 		token:          strings.TrimSpace(cfg.Token),
 		composeFile:    envOrDefaultValue(cfg.ComposeFile, defaultComposeFile),
 		envFile:        envOrDefaultValue(cfg.EnvFile, defaultEnvFile),
@@ -211,11 +242,15 @@ func newUpdaterServer(cfg updaterConfig) *updaterServer {
 		defaultService: envOrDefaultValue(cfg.DefaultService, defaultTargetService),
 		runner:         runner,
 		ctx:            ctx,
+		subscribers:    make(map[chan updateStatusResponse]struct{}),
 		status: updateStatusResponse{
 			Status: "idle",
 			Stage:  "idle",
 		},
 	}
+	server.stateFile = resolveUpdaterStateFile(cfg.StateFile)
+	server.restoreStatus()
+	return server
 }
 
 func (s *updaterServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -224,11 +259,14 @@ func (s *updaterServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot := s.snapshot()
-	payload := map[string]string{"status": snapshot.Status}
+	payload := map[string]any{
+		"status":           snapshot.Status,
+		"error":            "",
+		"protocol_version": 2,
+		"events":           "/v1/events",
+	}
 	if snapshot.Status == "failed" && strings.TrimSpace(snapshot.Message) != "" {
 		payload["error"] = snapshot.Message
-	} else {
-		payload["error"] = ""
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -252,7 +290,7 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
@@ -265,49 +303,70 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runID, started := s.startUpdate(service, req)
+	if !started {
+		http.Error(w, "update already running", http.StatusConflict)
+		return
+	}
+
 	envFile := s.envFile
 	if strings.TrimSpace(envFile) == "" && strings.TrimSpace(s.composeFile) != "" {
 		envFile = filepath.Join(filepath.Dir(s.composeFile), ".env")
 	}
 	previousImage := configuredImageInFile(envFile)
 	if err := persistRequestedImage(s.context(), envFile, req.Image, req.Tag); err != nil {
-		if errors.Is(err, errRequestedImageNotAllowed) {
-			message := err.Error()
-			log.Print(message)
-			s.setStatus("failed", message)
-			http.Error(w, message, http.StatusBadRequest)
-			return
-		}
 		message := "failed to update env file: " + err.Error()
+		statusCode := http.StatusInternalServerError
+		if errors.Is(err, errRequestedImageNotAllowed) {
+			message = err.Error()
+			statusCode = http.StatusBadRequest
+		}
 		log.Print(message)
-		s.setStatus("failed", message)
-		http.Error(w, message, http.StatusInternalServerError)
+		s.finishUpdate(runID, "failed", "failed", "request_rejected", message)
+		http.Error(w, message, statusCode)
 		return
 	}
 
-	runID := s.startUpdate(service, req)
 	go func() {
 		ctx, cancel := context.WithTimeout(s.context(), updateCommandTimeout)
 		defer cancel()
 		reporter := updaterRunReporter{server: s, runID: runID}
-		if err := s.runner(ctx, s.composeFile, s.envFile, s.projectName, service, reporter); err != nil {
+		if err := s.runner(ctx, s.composeFile, envFile, s.projectName, service, reporter); err != nil {
 			err = restoreRequestedImage(ctx, envFile, previousImage, reporter, err)
 			log.Printf("compose update failed: %v", err)
-			reporter.Stage("failed", err.Error())
-			s.finishUpdate(runID, "failed", "failed", err.Error())
+			s.finishUpdate(runID, "failed", "failed", "update_failed", err.Error())
 			return
 		}
 		if message, skipped := s.pullSkipFailure(runID); skipped {
 			message = restoreRequestedImage(ctx, envFile, previousImage, reporter, errors.New(message)).Error()
-			reporter.Stage("failed", message)
-			s.finishUpdate(runID, "failed", "failed", message)
+			s.finishUpdate(runID, "failed", "failed", "image_pull_skipped", message)
 			return
 		}
-		reporter.Stage("completed", "update completed")
-		s.finishUpdate(runID, "completed", "completed", "update completed")
+		targetImage := requestedImageRef(req.Image, req.Tag)
+		scheduled, err := scheduleUpdaterRefresh(ctx, s.composeFile, envFile, s.projectName, targetImage, runID, reporter)
+		if err != nil {
+			log.Printf("updater sidecar refresh scheduling failed: %v", err)
+			s.finishUpdate(runID, "failed", "failed", "updater_refresh_failed", err.Error())
+			return
+		}
+		if scheduled {
+			progress := s.snapshot()
+			reporter.Progress(
+				"finalizing",
+				"updater_refresh_scheduled",
+				"updater sidecar refresh is scheduled",
+				progress.ProgressCurrent+1,
+				progress.ProgressTotal,
+			)
+		}
+		s.finishUpdate(runID, "completed", "completed", "completed", "update completed")
 	}()
 
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "service": service})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status":  "accepted",
+		"service": service,
+		"run_id":  runID,
+	})
 }
 
 func (s *updaterServer) context() context.Context {
@@ -439,157 +498,40 @@ func (s *updaterServer) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(value), []byte(s.token)) == 1
 }
 
-func (s *updaterServer) startUpdate(service string, req updateRequest) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runID++
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.status = updateStatusResponse{
-		Status:          "running",
-		Stage:           "preparing",
-		Message:         "preparing update",
-		ProgressPercent: 5,
-		Service:         service,
-		TargetImage:     strings.TrimSpace(req.Image),
-		TargetTag:       strings.TrimSpace(req.Tag),
-		TargetVersion:   strings.TrimSpace(req.Version),
-		TargetCommit:    strings.TrimSpace(req.Commit),
-		TargetUIVersion: strings.TrimSpace(req.UIVersion),
-		TargetUICommit:  strings.TrimSpace(req.UICommit),
-		TargetChannel:   strings.TrimSpace(req.Channel),
-		StartedAt:       now,
-		UpdatedAt:       now,
-		Logs:            nil,
-	}
-	s.pullSkipped = false
-	s.pullSkipLog = ""
-	return s.runID
-}
-
-func (s *updaterServer) setStatus(status string, message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.status.Status = strings.TrimSpace(status)
-	s.status.Stage = strings.TrimSpace(status)
-	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(status)
-	s.status.UpdatedAt = now
-	if status == "failed" || status == "completed" {
-		s.status.FinishedAt = now
-	}
-}
-
-func (s *updaterServer) appendLog(runID uint64, stream string, message string) {
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if runID != s.runID {
-		return
-	}
-	if s.status.Stage == "pulling" && strings.Contains(trimmed, "Skipped") {
-		s.pullSkipped = true
-		if s.pullSkipLog == "" {
-			s.pullSkipLog = trimmed
-		}
-	}
-	s.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.updateProgressFromLog(trimmed)
-	s.status.Logs = append(s.status.Logs, updateLogEntry{
-		Timestamp: s.status.UpdatedAt,
-		Stream:    strings.TrimSpace(stream),
-		Message:   trimmed,
-	})
-	if len(s.status.Logs) > maxUpdateLogEntries {
-		s.status.Logs = append([]updateLogEntry(nil), s.status.Logs[len(s.status.Logs)-maxUpdateLogEntries:]...)
-	}
-}
-
-func (s *updaterServer) updateStage(runID uint64, stage string, message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if runID != s.runID {
-		return
-	}
-	s.status.Stage = strings.TrimSpace(stage)
-	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(stage)
-	s.updateProgressFromStage(stage, message)
-	s.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-}
-
-func (s *updaterServer) finishUpdate(runID uint64, status string, stage string, message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if runID != s.runID {
-		return
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.status.Status = strings.TrimSpace(status)
-	s.status.Stage = strings.TrimSpace(stage)
-	s.status.Message = strings.TrimSpace(message)
-	s.status.ProgressPercent = progressPercentForStage(stage)
-	s.status.UpdatedAt = now
-	s.status.FinishedAt = now
-}
-
-func (s *updaterServer) snapshot() updateStatusResponse {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	snapshot := s.status
-	if s.status.Migration != nil {
-		migration := *s.status.Migration
-		snapshot.Migration = &migration
-	}
-	if len(s.status.Logs) > 0 {
-		snapshot.Logs = append([]updateLogEntry(nil), s.status.Logs...)
-	}
-	return snapshot
-}
-
-type updaterRunReporter struct {
-	server *updaterServer
-	runID  uint64
-}
-
-func (r updaterRunReporter) Stage(stage string, message string) {
-	if r.server == nil {
-		return
-	}
-	r.server.updateStage(r.runID, stage, message)
-}
-
-func (r updaterRunReporter) Log(stream string, message string) {
-	if r.server == nil {
-		return
-	}
-	r.server.appendLog(r.runID, stream, message)
-}
-
 func runComposeUpdate(ctx context.Context, composeFile string, envFile string, projectName string, service string, reporter updateReporter) error {
+	reporter.Progress("preparing", "preparing_deployment", "preparing deployment configuration", 0, 0)
 	preparedEnvFile, err := ensureRuntimeDataStackConfig(ctx, composeFile, envFile, service, reporter)
 	if err != nil {
 		return err
 	}
 	envFile = preparedEnvFile
-	reporter.Stage("pulling", "pulling target image")
+	hasRuntimeDependencies := composeFileHasService(composeFile, "postgres") && composeFileHasService(composeFile, "redis")
+	total := 5
+	if hasRuntimeDependencies {
+		total++
+	}
+	completed := 1
+
+	reporter.Progress("pulling", "pulling_target_image", "pulling target image", completed, total)
 	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "pull", service); err != nil {
 		return err
 	}
-	if composeFileHasService(composeFile, "postgres") && composeFileHasService(composeFile, "redis") {
-		reporter.Stage("restarting", "starting runtime dependencies")
+	completed++
+
+	if hasRuntimeDependencies {
+		reporter.Progress("starting_dependencies", "starting_runtime_dependencies", "starting PostgreSQL and Redis", completed, total)
 		if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "postgres", "redis"); err != nil {
 			return err
 		}
+		completed++
 	}
-	reporter.Stage("restarting", "recreating service container without restarting dependencies")
-	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "--no-deps", "--remove-orphans", service); err != nil {
+
+	reporter.Progress("recreating", "recreating_service", "recreating service container and waiting for health", completed, total)
+	if err := runDockerCompose(ctx, composeFile, envFile, projectName, reporter, "up", "-d", "--no-deps", "--remove-orphans", "--wait", "--wait-timeout", "120", service); err != nil {
 		return err
 	}
-	reporter.Stage("verifying", "docker update commands completed")
+	completed += 2
+	reporter.Progress("verifying", "service_healthy", "updated service container is running and healthy", completed, total)
 	return nil
 }
 
@@ -614,7 +556,7 @@ func ensureRuntimeDataStackConfig(ctx context.Context, composeFile string, envFi
 		return envFile, nil
 	}
 
-	reporter.Stage("preparing", "upgrading docker compose runtime data stack")
+	reporter.Log("stdout", "upgrading docker compose runtime data stack")
 	nextCompose, appImage, err := upgradeComposeRuntimeStack(composeText, projectDir, service)
 	if err != nil {
 		return envFile, err
@@ -660,7 +602,6 @@ func upgradeComposeRuntimeStack(composeText string, projectDir string, service s
 		target["command"] = []any{"./CLIProxyAPI"}
 	}
 	targetEnv := withoutEnvKeys(target["environment"], runtimeStackEnvKeys()...)
-	targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"] = "false"
 	target["environment"] = targetEnv
 	target["volumes"] = appendVolume(target["volumes"], "${CLIRELAY_PROJECT_DIR:-"+projectDir+"}:/clirelay-deploy")
 	targetNetworks := target["networks"]
@@ -787,6 +728,7 @@ func updaterComposeService(projectDir string, targetService string, image string
 			"CLIRELAY_ENV_FILE":             "${CLIRELAY_ENV_FILE:-${CLIRELAY_PROJECT_DIR:-" + projectDir + "}/.env}",
 			"CLIRELAY_COMPOSE_PROJECT_NAME": "${CLIRELAY_COMPOSE_PROJECT_NAME:-}",
 			"CLIRELAY_TARGET_SERVICE":       "${CLIRELAY_TARGET_SERVICE:-" + targetService + "}",
+			"CLIRELAY_UPDATER_STATE_FILE":   "${CLIRELAY_UPDATER_STATE_FILE:-${CLIRELAY_PROJECT_DIR:-" + projectDir + "}/.clirelay-updater-status.json}",
 		},
 		"volumes": []any{
 			"/var/run/docker.sock:/var/run/docker.sock",
@@ -866,6 +808,10 @@ func runtimeStackEnvKeys() []string {
 		"CLIRELAY_TARGET_SERVICE",
 		"CLIRELAY_UPDATER_URL",
 		"CLIRELAY_UPDATER_TOKEN",
+		"CLIRELAY_UPDATER_STATE_FILE",
+		"CLIRELAY_SQLITE_AUTO_MIGRATE",
+		"CLIRELAY_SQLITE_AUTO_IMPORT",
+		"CLIRELAY_SQLITE_PATH",
 	}
 }
 

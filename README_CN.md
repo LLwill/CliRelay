@@ -264,17 +264,56 @@ auto-update:
 
 ### 🗄️ 运行时数据栈
 
-CliRelay 通过 Ent ORM 使用 PostgreSQL 15+ 作为运行时主数据库。Redis 7+ 只负责缓存、锁、限流、队列和可重建快照。仓库内的 Docker Compose 会自动启动这两个服务，并通过生成的 `.env` 注入容器内连接地址。
+CliRelay 当前运行时数据栈已经完全统一为 PostgreSQL 15+、Redis 7+ 和 Ent ORM：PostgreSQL 是业务数据唯一事实源，Redis 只负责缓存、锁、限流、队列和可重建状态。SQLite 不再作为运行时数据库，也不参与正常启动、健康检查或 OTA 在线更新。
 
-如果旧 Docker 部署还停留在 SQLite-only compose，在 `/manage/system` 里触发在线更新时，updater 会先升级 `docker-compose.yml` 和 `.env`，补上 `clirelay-init`、PostgreSQL、Redis 和 updater 服务，然后启动 PostgreSQL/Redis 并重建业务容器。SQLite 文件会原样保留；如确实需要导入旧库，请使用下面的手工迁移命令。
+标准 Docker Compose 部署会启动 `clirelay-init`、PostgreSQL、Redis、业务容器和 updater sidecar。正常执行 `docker compose up -d` 或在管理面板中在线更新时，系统**不会扫描 `usage.db`、不会执行 SQLite inventory、不会自动导入 SQLite，也不会在更新进度中出现 SQLite 迁移阶段**。旧 compose 中残留的 `clirelay-migrate` 服务和 `CLIRELAY_SQLITE_AUTO_*` 启动配置会在部署栈升级时移除，但原始 SQLite 文件不会被删除或修改。
 
-如果旧容器因为挂载方式太老，导致 updater 无法写回部署文件，请先把 `docker-compose.yml` 替换成仓库最新版，再执行一次 `docker compose up -d`。完成后，后续在线更新就可以自动更新 compose 文件。
+OTA 更新状态由 updater sidecar 持有，并通过 SSE 实时发送。管理面板只展示 updater 返回的任务 ID、实际执行阶段、已完成步骤、当前/目标版本、管理面板版本、目标镜像、最新 Release 信息和最终结果，不再通过前端计时器模拟百分比。更新期间即使业务容器重启、页面刷新或 SSE 短暂断开，前端也会重新连接并读取 updater 的最新快照。Compose 默认把快照保存到 `.clirelay-updater-status.json`；更新器异常重启时，未完成任务会被明确标记为失败，不会继续显示为运行中。 业务容器通过健康检查后，当前 updater 会启动一个基于目标镜像的临时 helper，由 helper 安全重建 updater sidecar，使后续 OTA 继续使用目标版本的更新逻辑。
 
-非 Compose 部署时：
-1. 准备 PostgreSQL 15+ 与 Redis 7+。
-2. 在 `config.yaml` 中设置 `postgres.dsn` 和 `redis.*`，或通过 `CLIRELAY_POSTGRES_DSN`、`CLIRELAY_REDIS_ENABLE`、`CLIRELAY_REDIS_ADDR`、`CLIRELAY_REDIS_PASSWORD`、`CLIRELAY_REDIS_DB` 覆盖。
-3. 迁移前运行 `./cli-proxy-api -sqlite-dry-run /path/to/usage.db`，只读生成旧 SQLite 表清单、行数、ID/时间范围和 checksum；该命令不会输出行内容。
-4. 设置 `CLIRELAY_POSTGRES_DSN` 后运行 `./cli-proxy-api -sqlite-import /path/to/usage.db`，先对比源/目标行数与 checksum 且不写入；确认报告后再加 `-sqlite-import-dry-run=false` 执行导入。
+#### 仅旧版本用户需要的 SQLite 手工迁移
+
+仓库和 Docker 镜像仍保留 `scripts/migrate-sqlite-to-postgres.sh`，只用于从旧版 SQLite `usage.db` 手工导入 PostgreSQL。该脚本是独立迁移工具，**不会被 CliRelay 启动流程或 OTA 自动调用**。全新安装、已经使用 PostgreSQL 的部署，以及不需要保留旧 SQLite 历史数据的用户都不应执行它。
+
+迁移前必须：
+
+1. 备份原始 `usage.db`，并保留只读副本；不要在迁移过程中让旧版本继续写入该文件。
+2. 先准备并启动 PostgreSQL 15+ 和 Redis 7+，确认 `CLIRELAY_POSTGRES_DSN` 指向正确的目标库。
+3. 先运行 inventory 和 PostgreSQL dry-run，检查表、行数、ID/时间范围、checksum 与计划写入数量。
+4. 只有核对 dry-run 后才执行 apply；完成后再次校验 PostgreSQL 数据。脚本不会删除、移动或写入 SQLite 文件，重复导入由 PostgreSQL 中的导入记录和 advisory lock 保护。
+
+非 Docker 部署可以直接执行：
+
+```bash
+CLIRELAY_BIN=/opt/clirelay2/clirelay2 \
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./scripts/migrate-sqlite-to-postgres.sh /path/to/usage.db
+```
+
+Docker Compose 部署先确保 PostgreSQL/Redis 已启动，再把旧库只读挂载到一次性容器中：
+
+```bash
+docker compose up -d postgres redis
+
+docker compose run --rm --no-deps \
+  -e CLIRELAY_BIN=/CLIProxyAPI/CLIProxyAPI \
+  -v /absolute/path/to/usage.db:/migration/usage.db:ro \
+  cli-proxy-api \
+  /usr/local/bin/migrate-sqlite-to-postgres.sh /migration/usage.db
+```
+
+脚本默认依次执行 SQLite 只读 inventory、PostgreSQL 导入 dry-run 和实际 apply。若只想检查而不写入 PostgreSQL，增加 `-e CLIRELAY_SQLITE_AUTO_IMPORT=false`。也可以分步使用二进制命令：
+
+```bash
+./cli-proxy-api -sqlite-dry-run /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db -sqlite-import-dry-run=false
+```
+
+如果旧 Docker 部署仍是 SQLite-only compose，应先替换为仓库最新版 `docker-compose.yml` 并执行 `docker compose up -d postgres redis clirelay-updater`，再手工迁移数据。对于不支持 updater SSE 的旧 sidecar，需要额外执行一次 `docker compose up -d --force-recreate clirelay-updater`，之后的 OTA 才能使用新的实时进度与断线恢复协议。完整迁移边界见 [`docs/postgres-redis-migration.md`](docs/postgres-redis-migration.md)。
 
 如果你的请求量较大，可以在 `config.yaml` 中调整 `request-log-storage`。默认情况下，全文请求/响应正文会以压缩形式保留 30 天，并默认做了约 1GB（1024MB）的总量上限；而轻量级请求元数据可继续用于长期统计与筛选。将 `content-retention-days: 0` 设为永久保留全文；将 `store-content: false` 设为停止写入新的正文，同时保留已有历史全文；调整 `max-total-size-mb` 可设置正文存储体积上限，这样即使 retention 周期还没到，也会提前裁剪最老的全文正文。
 

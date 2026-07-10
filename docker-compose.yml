@@ -33,7 +33,6 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
-      CLIRELAY_SQLITE_AUTO_MIGRATE: "false"
       CLIRELAY_LOCALE: ${CLIRELAY_LOCALE:-zh}
       CLIRELAY_UPDATE_CHANNEL: ${CLIRELAY_UPDATE_CHANNEL:-main}
       AUTH_PATH: ${AUTH_PATH:-/CLIProxyAPI/auths}
@@ -74,6 +73,7 @@ services:
       CLIRELAY_ENV_FILE: ${CLIRELAY_ENV_FILE:-${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/.env}
       CLIRELAY_COMPOSE_PROJECT_NAME: ${CLIRELAY_COMPOSE_PROJECT_NAME:-}
       CLIRELAY_TARGET_SERVICE: ${CLIRELAY_TARGET_SERVICE:-cli-proxy-api}
+      CLIRELAY_UPDATER_STATE_FILE: ${CLIRELAY_UPDATER_STATE_FILE:-${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/.clirelay-updater-status.json}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CLIRELAY_PROJECT_DIR:-${PWD:-.}}:${CLIRELAY_PROJECT_DIR:-${PWD:-.}}

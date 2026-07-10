@@ -419,7 +419,13 @@ func TestBuildUpdateCheckAllowsDevUpdateAfterDockerPublishReady(t *testing.T) {
 		}
 	}
 	fetchLatestReleaseInfoForUpdateCheck = func(ctx context.Context, client *http.Client, repo string) (releaseInfo, error) {
-		return releaseInfo{}, nil
+		return releaseInfo{
+			TagName:     "v0.5.0",
+			Name:        "CliRelay v0.5.0",
+			Body:        "latest changes",
+			HTMLURL:     "https://github.com/kittors/CliRelay/releases/tag/v0.5.0",
+			PublishedAt: sourceTime,
+		}, nil
 	}
 	fetchLatestSuccessfulWorkflowRunForUpdateCheck = func(ctx context.Context, client *http.Client, repo string, workflow string, branch string) (workflowRunInfo, error) {
 		return workflowRunInfo{
@@ -452,6 +458,12 @@ func TestBuildUpdateCheckAllowsDevUpdateAfterDockerPublishReady(t *testing.T) {
 	}
 	if resp.Message != "" {
 		t.Fatalf("Message = %q, want empty for available update", resp.Message)
+	}
+	if resp.ReleaseName != "CliRelay v0.5.0" || resp.ReleaseTag != "v0.5.0" || resp.ReleaseNotes != "latest changes" {
+		t.Fatalf("release metadata = %+v", resp)
+	}
+	if resp.ReleasePublishedAt != sourceTime.Format(time.RFC3339) {
+		t.Fatalf("ReleasePublishedAt = %q, want %q", resp.ReleasePublishedAt, sourceTime.Format(time.RFC3339))
 	}
 }
 
@@ -648,6 +660,42 @@ func TestBuildCurrentUpdateStateReportsMissingUpdaterToken(t *testing.T) {
 	}
 }
 
+func TestBuildCurrentUpdateStateRequiresSSEUpdaterProtocol(t *testing.T) {
+	updater := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"idle","error":""}`)
+	}))
+	t.Cleanup(updater.Close)
+	t.Setenv("CLIRELAY_UPDATER_URL", updater.URL)
+	t.Setenv("CLIRELAY_UPDATER_TOKEN", "test-token")
+
+	resp := (&Handler{cfg: &config.Config{}}).buildCurrentUpdateState(context.Background())
+	if resp.UpdaterAvailable {
+		t.Fatal("UpdaterAvailable = true, want false for legacy updater protocol")
+	}
+	if resp.UpdaterHealthStatus != "upgrade_required" {
+		t.Fatalf("UpdaterHealthStatus = %q, want upgrade_required", resp.UpdaterHealthStatus)
+	}
+	if !strings.Contains(resp.UpdaterHealthMessage, "SSE") {
+		t.Fatalf("UpdaterHealthMessage = %q, want SSE upgrade guidance", resp.UpdaterHealthMessage)
+	}
+}
+
+func TestBuildCurrentUpdateStateAcceptsSSEUpdaterProtocol(t *testing.T) {
+	updater := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"idle","error":"","protocol_version":2,"events":"/v1/events"}`)
+	}))
+	t.Cleanup(updater.Close)
+	t.Setenv("CLIRELAY_UPDATER_URL", updater.URL)
+	t.Setenv("CLIRELAY_UPDATER_TOKEN", "test-token")
+
+	resp := (&Handler{cfg: &config.Config{}}).buildCurrentUpdateState(context.Background())
+	if !resp.UpdaterAvailable || resp.UpdaterHealthStatus != "ok" {
+		t.Fatalf("updater health = available:%v status:%q message:%q", resp.UpdaterAvailable, resp.UpdaterHealthStatus, resp.UpdaterHealthMessage)
+	}
+}
+
 func TestBuildCurrentUpdateStateReportsUpdaterAuthFailure(t *testing.T) {
 	origDefaultClient := http.DefaultClient
 	t.Cleanup(func() {
@@ -692,7 +740,7 @@ func TestFetchUpdateProgressProxiesUpdaterStatus(t *testing.T) {
 			t.Fatalf("Authorization = %q, want Bearer test-token", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"running","stage":"migrating","progress_percent":86,"target_version":"dev-abcdef1","migration":{"phase":"applying","target_database":"PostgreSQL","table":"request_logs","table_index":16,"table_total":17,"inserted_rows":2,"target_rows":167648},"logs":[{"timestamp":"2026-04-20T07:30:01Z","stream":"stdout","message":"docker compose pull clirelay"}]}`))
+		_, _ = w.Write([]byte(`{"run_id":9,"event_id":12,"status":"running","stage":"pulling","message_code":"pulling_target_image","progress_percent":40,"progress_current":2,"progress_total":5,"current_version":"dev-old","target_version":"dev-abcdef1","release_name":"CliRelay v0.5.0","release_notes":"latest changes","logs":[{"timestamp":"2026-04-20T07:30:01Z","stream":"stdout","message":"docker compose pull clirelay"}]}`))
 	}))
 	t.Cleanup(updater.Close)
 	t.Setenv("CLIRELAY_UPDATER_URL", updater.URL)
@@ -703,42 +751,52 @@ func TestFetchUpdateProgressProxiesUpdaterStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchUpdateProgress() error = %v, want nil", err)
 	}
-	if progress.Status != "running" {
-		t.Fatalf("Status = %q, want running", progress.Status)
+	if progress.Status != "running" || progress.Stage != "pulling" {
+		t.Fatalf("status = %q/%q, want running/pulling", progress.Status, progress.Stage)
 	}
-	if progress.Stage != "migrating" {
-		t.Fatalf("Stage = %q, want migrating", progress.Stage)
+	if progress.RunID != 9 || progress.EventID != 12 {
+		t.Fatalf("ids = %d/%d, want 9/12", progress.RunID, progress.EventID)
 	}
-	if progress.ProgressPercent != 86 {
-		t.Fatalf("ProgressPercent = %.2f, want 86", progress.ProgressPercent)
+	if progress.ProgressCurrent != 2 || progress.ProgressTotal != 5 || progress.ProgressPercent != 40 {
+		t.Fatalf("progress = %d/%d %.2f, want 2/5 40", progress.ProgressCurrent, progress.ProgressTotal, progress.ProgressPercent)
 	}
-	if progress.Migration == nil || progress.Migration.Table != "request_logs" || progress.Migration.TargetRows != 167648 {
-		t.Fatalf("Migration = %+v, want migration details", progress.Migration)
-	}
-	if progress.TargetVersion != "dev-abcdef1" {
-		t.Fatalf("TargetVersion = %q, want dev-abcdef1", progress.TargetVersion)
+	if progress.TargetVersion != "dev-abcdef1" || progress.ReleaseName != "CliRelay v0.5.0" {
+		t.Fatalf("target metadata = %+v", progress)
 	}
 	if len(progress.Logs) != 1 || progress.Logs[0].Message != "docker compose pull clirelay" {
 		t.Fatalf("Logs = %+v, want updater log entry", progress.Logs)
 	}
 }
 
-func TestFetchUpdateProgressProxiesMigrationSkipReason(t *testing.T) {
+func TestStreamUpdateProgressProxiesUpdaterSSE(t *testing.T) {
 	updater := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"running","stage":"migrating","progress_percent":88,"message":"no legacy SQLite database found; continuing with PostgreSQL runtime data","migration":{"phase":"skipped","target_database":"PostgreSQL","skip_reason":"no_legacy_sqlite"}}`))
+		if r.URL.Path != "/v1/events" {
+			t.Fatalf("path = %q, want /v1/events", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want Bearer test-token", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: 12\nevent: update\ndata: {\"run_id\":9,\"status\":\"running\",\"stage\":\"pulling\"}\n\n")
 	}))
 	t.Cleanup(updater.Close)
 	t.Setenv("CLIRELAY_UPDATER_URL", updater.URL)
 	t.Setenv("CLIRELAY_UPDATER_TOKEN", "test-token")
 
-	handler := &Handler{cfg: &config.Config{}}
-	progress, err := handler.fetchUpdateProgress(context.Background())
-	if err != nil {
-		t.Fatalf("fetchUpdateProgress() error = %v, want nil", err)
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/update/events", nil)
+	(&Handler{cfg: &config.Config{}}).StreamUpdateProgress(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
-	if progress.Migration == nil || progress.Migration.SkipReason != "no_legacy_sqlite" {
-		t.Fatalf("Migration = %+v, want proxied skip reason", progress.Migration)
+	if contentType := recorder.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q", contentType)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"run_id":9`) || !strings.Contains(body, "event: update") {
+		t.Fatalf("proxied SSE body = %q", body)
 	}
 }
 

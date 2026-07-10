@@ -193,6 +193,16 @@ func CheckUpdaterHealth(ctx context.Context, cfg *config.Config) UpdaterHealth {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var capability struct {
+			ProtocolVersion int    `json:"protocol_version"`
+			Events          string `json:"events"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&capability); err != nil || capability.ProtocolVersion < 2 || strings.TrimSpace(capability.Events) == "" {
+			return UpdaterHealth{
+				Status:  UpdaterHealthStatusUpgradeRequired,
+				Message: "updater sidecar does not support the SSE update protocol; recreate clirelay-updater once",
+			}
+		}
 		return UpdaterHealth{Available: true, Status: UpdaterHealthStatusOK}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

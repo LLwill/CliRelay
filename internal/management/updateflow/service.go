@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -111,8 +112,11 @@ func (s *Service) BuildUpdateCheck(ctx context.Context) (*CheckResponse, error) 
 		LatestUICommitURL:    latestUICommitURL,
 		DockerImage:          cfg.AutoUpdate.DockerImage,
 		DockerTag:            DockerTagForChannel(channel, branch.SHA),
+		ReleaseName:          strings.TrimSpace(release.Name),
+		ReleaseTag:           strings.TrimSpace(release.TagName),
 		ReleaseNotes:         releaseNotes,
 		ReleaseURL:           strings.TrimSpace(release.HTMLURL),
+		ReleasePublishedAt:   formatReleaseTime(release.PublishedAt),
 		UpdateAvailable:      cfg.AutoUpdate.Enabled && rawUpdateAvailable && dockerPublishReady,
 		UpdaterAvailable:     updaterHealth.Available,
 		UpdaterHealthStatus:  updaterHealth.Status,
@@ -203,28 +207,62 @@ func (s *Service) FetchProgress(ctx context.Context) (*ProgressResponse, error) 
 	return &payload, nil
 }
 
-func (s *Service) TriggerUpdate(ctx context.Context, check *CheckResponse) error {
+func (s *Service) OpenProgressStream(ctx context.Context, lastEventID string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, JoinURLPath(ResolveUpdaterURL(s.cfg), "/v1/events"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if token := UpdaterToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if id := strings.TrimSpace(lastEventID); id != "" {
+		req.Header.Set("Last-Event-ID", id)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("updater events %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return resp, nil
+}
+
+func (s *Service) TriggerUpdate(ctx context.Context, check *CheckResponse) (*TriggerResponse, error) {
 	if check == nil {
-		return fmt.Errorf("update target is nil")
+		return nil, fmt.Errorf("update target is nil")
 	}
 	payload := map[string]string{
-		"image":      check.DockerImage,
-		"tag":        check.DockerTag,
-		"channel":    check.TargetChannel,
-		"version":    check.LatestVersion,
-		"commit":     check.LatestCommit,
-		"ui_version": check.LatestUIVersion,
-		"ui_commit":  check.LatestUICommit,
-		"service":    UpdaterTargetService(),
+		"image":                check.DockerImage,
+		"tag":                  check.DockerTag,
+		"channel":              check.TargetChannel,
+		"current_version":      check.CurrentVersion,
+		"current_commit":       check.CurrentCommit,
+		"current_ui_version":   check.CurrentUIVersion,
+		"current_ui_commit":    check.CurrentUICommit,
+		"version":              check.LatestVersion,
+		"commit":               check.LatestCommit,
+		"commit_url":           check.LatestCommitURL,
+		"ui_version":           check.LatestUIVersion,
+		"ui_commit":            check.LatestUICommit,
+		"ui_commit_url":        check.LatestUICommitURL,
+		"release_name":         check.ReleaseName,
+		"release_tag":          check.ReleaseTag,
+		"release_notes":        check.ReleaseNotes,
+		"release_url":          check.ReleaseURL,
+		"release_published_at": check.ReleasePublishedAt,
+		"service":              UpdaterTargetService(),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal_failed: %w", err)
+		return nil, fmt.Errorf("marshal_failed: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, JoinURLPath(ResolveUpdaterURL(s.cfg), "/v1/update"), bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("request_create_failed: %w", err)
+		return nil, fmt.Errorf("request_create_failed: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token := UpdaterToken(); token != "" {
@@ -234,14 +272,28 @@ func (s *Service) TriggerUpdate(ctx context.Context, check *CheckResponse) error
 	client := &http.Client{Timeout: UpdateHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("updater_unreachable: %w", err)
+		return nil, fmt.Errorf("updater_unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("updater_failed: %s", strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("updater_failed: %s", strings.TrimSpace(string(data)))
 	}
-	return nil
+	var result TriggerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("updater_response_invalid: %w", err)
+	}
+	if result.RunID == 0 {
+		return nil, fmt.Errorf("updater_response_invalid: missing run_id")
+	}
+	return &result, nil
+}
+
+func formatReleaseTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func (s *Service) config() *config.Config {
