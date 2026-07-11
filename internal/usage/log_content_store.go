@@ -31,7 +31,6 @@ const (
 )
 
 type requestLogStorageRuntime struct {
-	StoreContent           bool
 	ContentRetentionDays   int
 	CleanupIntervalMinutes int
 	MaxTotalSizeMB         int
@@ -40,7 +39,6 @@ type requestLogStorageRuntime struct {
 
 var (
 	requestLogStorage = requestLogStorageRuntime{
-		StoreContent:           true,
 		ContentRetentionDays:   30,
 		CleanupIntervalMinutes: 1440,
 		MaxTotalSizeMB:         1024,
@@ -53,6 +51,7 @@ var (
 
 	lastUsageVacuumUnixNano atomic.Int64
 	requestLogContentBytes  atomic.Int64 // total compressed bytes; -1 means unknown
+	requestLogBodiesEnabled atomic.Bool
 
 	zstdEncoderPool = sync.Pool{
 		New: func() any {
@@ -76,6 +75,7 @@ var (
 
 func init() {
 	requestLogContentBytes.Store(-1)
+	requestLogBodiesEnabled.Store(false)
 	// Initialize atomic.Value type so subsequent stores can use typed nil safely.
 	requestLogMaintenanceWakeup.Store((chan struct{})(nil))
 }
@@ -84,19 +84,20 @@ func contentRetentionUnlimited() bool {
 	return requestLogStorage.ContentRetentionDays <= 0
 }
 
-func normalizeRequestLogStorageConfig(cfg config.RequestLogStorageConfig) requestLogStorageRuntime {
-	if !cfg.StoreContent && cfg.ContentRetentionDays == 0 && cfg.CleanupIntervalMinutes == 0 && !cfg.VacuumOnCleanup {
-		return requestLogStorageRuntime{
-			StoreContent:           true,
-			ContentRetentionDays:   30,
-			CleanupIntervalMinutes: 1440,
-			MaxTotalSizeMB:         1024,
-			VacuumOnCleanup:        true,
-		}
-	}
+// RequestLogBodyStorageEnabled reports whether full request and response bodies
+// are currently persisted. Request details are stored independently.
+func RequestLogBodyStorageEnabled() bool {
+	return requestLogBodiesEnabled.Load()
+}
 
+// SetRequestLogBodyStorageEnabled applies the body-storage toggle immediately
+// without requiring a process restart.
+func SetRequestLogBodyStorageEnabled(enabled bool) {
+	requestLogBodiesEnabled.Store(enabled)
+}
+
+func normalizeRequestLogStorageConfig(cfg config.RequestLogStorageConfig) requestLogStorageRuntime {
 	runtimeCfg := requestLogStorageRuntime{
-		StoreContent:           cfg.StoreContent,
 		ContentRetentionDays:   cfg.ContentRetentionDays,
 		CleanupIntervalMinutes: cfg.CleanupIntervalMinutes,
 		MaxTotalSizeMB:         cfg.MaxTotalSizeMB,
@@ -141,9 +142,9 @@ func triggerRequestLogCompaction() {
 	}
 }
 
-func startRequestLogMaintenance(db *sql.DB) {
+func startRequestLogMaintenance(db *sql.DB, driver string) {
 	stopRequestLogMaintenance()
-	if db == nil || !requestLogStorage.StoreContent {
+	if db == nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -158,7 +159,7 @@ func startRequestLogMaintenance(db *sql.DB) {
 	// - 清理方式: cancel 后等待 requestLogMaintenanceWG，确保协程退出
 	go func() {
 		defer requestLogMaintenanceWG.Done()
-		runRequestLogMaintenancePass(db)
+		runRequestLogMaintenancePass(db, driver)
 
 		ticker := time.NewTicker(time.Duration(requestLogStorage.CleanupIntervalMinutes) * time.Minute)
 		defer ticker.Stop()
@@ -173,7 +174,7 @@ func startRequestLogMaintenance(db *sql.DB) {
 				// and reclaiming free pages when appropriate.
 				compactLogContentStorageInternal(db, false)
 			case <-ticker.C:
-				runRequestLogMaintenancePass(db)
+				runRequestLogMaintenancePass(db, driver)
 			}
 		}
 	}()
@@ -188,9 +189,15 @@ func stopRequestLogMaintenance() {
 	requestLogMaintenanceWakeup.Store((chan struct{})(nil))
 }
 
-func runRequestLogMaintenancePass(db *sql.DB) {
+func runRequestLogMaintenancePass(db *sql.DB, driver string) {
 	if db == nil {
 		return
+	}
+	if !RequestLogBodyStorageEnabled() {
+		if _, err := purgeStoredRequestBodies(db, driver); err != nil {
+			log.Errorf("usage: purge disabled request log body storage: %v", err)
+			return
+		}
 	}
 
 	// Refresh the running total periodically so size-cap enforcement stays fast
@@ -253,7 +260,15 @@ func refreshRequestLogContentBytes(q logContentQuerier) {
 }
 
 func insertLogContentTx(tx *sql.Tx, logID int64, timestamp time.Time, inputContent, outputContent, detailContent string) error {
-	if tx == nil || logID < 1 || (!requestLogStorage.StoreContent) {
+	if tx == nil || logID < 1 {
+		return nil
+	}
+	if !RequestLogBodyStorageEnabled() {
+		inputContent = ""
+		outputContent = ""
+		detailContent = stripStoredRequestDetailBodies(detailContent)
+	}
+	if inputContent == "" && outputContent == "" && detailContent == "" {
 		return nil
 	}
 	sessionID := extractSessionIDFromDetails(detailContent)
@@ -364,7 +379,7 @@ func decompressLogContent(compression string, content []byte) (string, error) {
 }
 
 func migrateLegacyContentBatch(db *sql.DB, batchSize int) (int, error) {
-	if db == nil || !requestLogStorage.StoreContent {
+	if db == nil || !RequestLogBodyStorageEnabled() {
 		return 0, nil
 	}
 	if batchSize <= 0 {
@@ -420,7 +435,7 @@ func migrateLegacyContentBatch(db *sql.DB, batchSize int) (int, error) {
 			timestamp = time.Now().UTC()
 		}
 
-		shouldKeep := requestLogStorage.StoreContent && withinContentRetention(timestamp)
+		shouldKeep := RequestLogBodyStorageEnabled() && withinContentRetention(timestamp)
 		if shouldKeep {
 			if errStore := insertLogContentTx(tx, row.ID, timestamp, row.InputContent, row.OutputContent, ""); errStore != nil {
 				_ = tx.Rollback()
@@ -452,7 +467,7 @@ func withinContentRetention(timestamp time.Time) bool {
 }
 
 func cleanupExpiredLogContent(db *sql.DB) (int64, error) {
-	if db == nil || !requestLogStorage.StoreContent || contentRetentionUnlimited() {
+	if db == nil || contentRetentionUnlimited() {
 		return 0, nil
 	}
 
