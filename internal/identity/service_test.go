@@ -125,6 +125,23 @@ func TestMenuCatalogReferencesExistingParents(t *testing.T) {
 	if systemInfo.SortOrder < seen["group.system"].SortOrder {
 		t.Fatalf("runtime.system sort_order %d must be after group.system %d", systemInfo.SortOrder, seen["group.system"].SortOrder)
 	}
+	// Model plaza is a tenant-facing available-models surface under models group.
+	plaza, ok := seen["models.plaza"]
+	if !ok {
+		t.Fatal("models.plaza menu is missing")
+	}
+	if plaza.ParentCode != "group.models" {
+		t.Fatalf("models.plaza parent = %q, want group.models", plaza.ParentCode)
+	}
+	if plaza.Path != "/models/plaza" {
+		t.Fatalf("models.plaza path = %q, want /models/plaza", plaza.Path)
+	}
+	if plaza.Component != "model-plaza" {
+		t.Fatalf("models.plaza component = %q, want model-plaza", plaza.Component)
+	}
+	if plaza.PermissionCode != "system.status.read" {
+		t.Fatalf("models.plaza permission = %q, want system.status.read", plaza.PermissionCode)
+	}
 }
 
 func TestGeneratedIdentifier(t *testing.T) {
