@@ -67,11 +67,13 @@ type MenuInput struct {
 // secondary routes under that prefix (e.g. /runtime/monitor under /runtime).
 //
 // Information architecture (operator-facing):
-// 运行观测 — live health, request traces, runtime logs, host status
+// 仪表盘 — overview
+// 运行观测 — live health, request traces, runtime logs
 // 接入与凭证 — upstream providers, AI OAuth accounts, client API keys, key profiles
 // 模型与调度 — model catalog, image models, routing groups, outbound proxies
 // 组织与权限 — tenants, users, roles, audit
 // 系统设置 — global config, menu management
+// 系统信息 — host/runtime status (top-level leaf, pinned last)
 var MenuCatalog = []MenuSeed{
 	{Code: "dashboard", Type: "menu", Path: "/dashboard", Component: "dashboard", LabelKey: "shell.nav_dashboard", Icon: "layout-dashboard", PermissionCode: "dashboard.read", SortOrder: 10},
 	{Code: "group.runtime", Type: "directory", Path: "/runtime", Component: "Layout", LabelKey: "shell.nav_group_runtime", Icon: "activity", SortOrder: 20},
@@ -79,11 +81,12 @@ var MenuCatalog = []MenuSeed{
 	{Code: "group.models", Type: "directory", Path: "/models", Component: "Layout", LabelKey: "shell.nav_group_models", Icon: "layers", SortOrder: 40},
 	{Code: "group.governance", Type: "directory", Path: "/governance", Component: "Layout", LabelKey: "shell.nav_group_governance", Icon: "users-round", SortOrder: 50},
 	{Code: "group.system", Type: "directory", Path: "/system", Component: "Layout", LabelKey: "shell.nav_group_system", Icon: "settings", SortOrder: 60},
+	// Top-level leaf after all groups. Stable code kept for role/menu bindings; path stays under /runtime.
+	{Code: "runtime.system", Type: "menu", Path: "/runtime/system", Component: "system", LabelKey: "shell.nav_system", Icon: "info", PermissionCode: "system.status.read", SortOrder: 70},
 	// Runtime / observability
 	{Code: "runtime.monitor", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/monitor", Component: "monitor", LabelKey: "shell.nav_monitor", Icon: "activity", PermissionCode: "monitor.read", SortOrder: 10},
 	{Code: "runtime.request-logs", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/request-logs", Component: "request-logs", LabelKey: "shell.nav_request_logs", Icon: "scroll-text", PermissionCode: "request_logs.read", SortOrder: 20},
 	{Code: "runtime.logs", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/logs", Component: "logs", LabelKey: "shell.nav_logs", Icon: "file-text", PermissionCode: "system.logs.read", SortOrder: 30},
-	{Code: "runtime.system", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/system", Component: "system", LabelKey: "shell.nav_system", Icon: "info", PermissionCode: "system.status.read", SortOrder: 40},
 	// Access & credentials (upstream AI + client keys)
 	{Code: "access.providers", ParentCode: "group.access", Type: "menu", Path: "/access/ai-providers", Component: "providers", LabelKey: "shell.nav_ai_providers", Icon: "bot", PermissionCode: "providers.read", SortOrder: 10},
 	// Stable code kept for role/menu bindings; path lives under /access as AI OAuth accounts.

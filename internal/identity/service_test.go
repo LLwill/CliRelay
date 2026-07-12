@@ -114,6 +114,17 @@ func TestMenuCatalogReferencesExistingParents(t *testing.T) {
 	if got := seen["access.ccswitch"].PermissionCode; got != "routing.read" {
 		t.Fatalf("access.ccswitch permission = %q, want routing.read so tenant admins can see it", got)
 	}
+	// System info is a top-level leaf (not under 运行观测), pinned after all groups.
+	systemInfo, ok := seen["runtime.system"]
+	if !ok {
+		t.Fatal("runtime.system menu is missing")
+	}
+	if systemInfo.ParentCode != "" {
+		t.Fatalf("runtime.system parent = %q, want empty top-level parent", systemInfo.ParentCode)
+	}
+	if systemInfo.SortOrder < seen["group.system"].SortOrder {
+		t.Fatalf("runtime.system sort_order %d must be after group.system %d", systemInfo.SortOrder, seen["group.system"].SortOrder)
+	}
 }
 
 func TestGeneratedIdentifier(t *testing.T) {
