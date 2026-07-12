@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -56,9 +57,142 @@ func (s *Service) ResolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return s.refreshClaudeOAuthAccessToken(ctx, auth)
 	case "kimi":
 		return s.refreshKimiOAuthAccessToken(ctx, auth)
+	case "xai", "x-ai", "grok":
+		return s.refreshXAIOAuthAccessToken(ctx, auth)
 	default:
 		return TokenValueForAuth(auth), nil
 	}
+}
+
+// refreshXAIOAuthAccessToken keeps management api-call / quota probes usable after
+// cross-tenant OAuth file import. Without refresh, expired access tokens surface as
+// "错误 / --" on auth-file cards even when refresh_token is still valid.
+func (s *Service) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	// API-key credentials never go through the OAuth refresh endpoint.
+	if authKind := strings.ToLower(stringValue(auth.Metadata, "auth_kind")); authKind == "api_key" {
+		return TokenValueForAuth(auth), nil
+	}
+	if apiKey := strings.TrimSpace(TokenValueForAuth(auth)); apiKey != "" {
+		if stringValue(auth.Metadata, "refresh_token") == "" && stringValue(auth.Metadata, "access_token") == "" {
+			return apiKey, nil
+		}
+	}
+
+	metadata := auth.Metadata
+	if len(metadata) == 0 {
+		return "", fmt.Errorf("xai oauth metadata missing")
+	}
+
+	current := strings.TrimSpace(TokenValueFromMetadata(metadata))
+	if current != "" && !xaiTokenNeedsRefresh(metadata) {
+		return current, nil
+	}
+
+	refreshToken := stringValue(metadata, "refresh_token")
+	if refreshToken == "" {
+		if current != "" {
+			return current, nil
+		}
+		return "", fmt.Errorf("xai refresh token missing")
+	}
+
+	tokenEndpoint := stringValue(metadata, "token_endpoint")
+	cfg := s.cfg
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, auth.ProxyURL)
+	tokenData, errRefresh := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
+	if errRefresh != nil {
+		return "", errRefresh
+	}
+	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
+		return "", fmt.Errorf("xai oauth token refresh returned empty access_token")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["type"] = "xai"
+	auth.Metadata["auth_kind"] = "oauth"
+	auth.Metadata["access_token"] = strings.TrimSpace(tokenData.AccessToken)
+	if strings.TrimSpace(tokenData.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(tokenData.RefreshToken)
+	}
+	if strings.TrimSpace(tokenData.IDToken) != "" {
+		auth.Metadata["id_token"] = strings.TrimSpace(tokenData.IDToken)
+	}
+	if strings.TrimSpace(tokenData.TokenType) != "" {
+		auth.Metadata["token_type"] = strings.TrimSpace(tokenData.TokenType)
+	}
+	if tokenData.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = tokenData.ExpiresIn
+	}
+	if strings.TrimSpace(tokenData.Expire) != "" {
+		auth.Metadata["expired"] = strings.TrimSpace(tokenData.Expire)
+	}
+	if strings.TrimSpace(tokenData.Email) != "" {
+		auth.Metadata["email"] = strings.TrimSpace(tokenData.Email)
+	}
+	if strings.TrimSpace(tokenData.Subject) != "" {
+		auth.Metadata["sub"] = strings.TrimSpace(tokenData.Subject)
+	}
+	if tokenEndpoint != "" {
+		auth.Metadata["token_endpoint"] = tokenEndpoint
+	}
+	if stringValue(auth.Metadata, "base_url") == "" {
+		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
+	}
+	auth.Metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["auth_kind"] = "oauth"
+	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
+		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
+	}
+	if email := stringValue(auth.Metadata, "email"); email != "" {
+		auth.Attributes["email"] = email
+	}
+
+	if s != nil && s.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = s.authManager.Update(ctx, auth)
+	}
+
+	return strings.TrimSpace(tokenData.AccessToken), nil
+}
+
+func xaiTokenNeedsRefresh(metadata map[string]any) bool {
+	const skew = 30 * time.Second
+	if metadata == nil {
+		return true
+	}
+	for _, key := range []string{"expired", "expiry", "expires_at", "expiresAt"} {
+		if expStr, ok := metadata[key].(string); ok {
+			if ts, errParse := time.Parse(time.RFC3339, strings.TrimSpace(expStr)); errParse == nil {
+				return !ts.After(time.Now().Add(skew))
+			}
+		}
+	}
+	expiresIn := int64Value(metadata["expires_in"])
+	timestampMs := int64Value(metadata["timestamp"])
+	if expiresIn > 0 && timestampMs > 0 {
+		exp := time.UnixMilli(timestampMs).Add(time.Duration(expiresIn) * time.Second)
+		return !exp.After(time.Now().Add(skew))
+	}
+	// No parseable expiry: keep current access_token (same as claude). Refresh only
+	// when the probe fails or metadata explicitly marks the token expired.
+	return false
 }
 
 func (s *Service) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {

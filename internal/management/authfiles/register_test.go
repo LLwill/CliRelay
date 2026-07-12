@@ -174,3 +174,125 @@ func makeRegisterJWT(t *testing.T, claims map[string]any) string {
 	}
 	return encode(map[string]any{"alg": "none", "typ": "JWT"}) + "." + encode(claims) + ".sig"
 }
+
+func TestRegistrarRegisterFileNormalizesXAIImport(t *testing.T) {
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	// Minimal exported xAI OAuth file (missing auth_kind/base_url/using_api).
+	path := filepath.Join(authDir, "xai-import.json")
+	data, err := json.Marshal(map[string]any{
+		"type":          "xai",
+		"email":         "import@example.com",
+		"access_token":  "access-token",
+		"refresh_token": "refresh-token",
+		"sub":           "sub-import",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err = Registrar{Manager: manager, AuthDir: authDir}.RegisterFile(context.Background(), path, data)
+	if err != nil {
+		t.Fatalf("RegisterFile() error = %v", err)
+	}
+	auth, ok := manager.GetByID("xai-import.json")
+	if !ok || auth == nil {
+		t.Fatal("registered auth not found")
+	}
+	if auth.Provider != "xai" || auth.FileName != "xai-import.json" {
+		t.Fatalf("provider/FileName = %q/%q", auth.Provider, auth.FileName)
+	}
+	if auth.Attributes["auth_kind"] != "oauth" {
+		t.Fatalf("auth_kind = %q, want oauth", auth.Attributes["auth_kind"])
+	}
+	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("base_url = %q", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["using_api"] != "false" {
+		t.Fatalf("using_api = %q, want false", auth.Attributes["using_api"])
+	}
+	if auth.Metadata["auth_kind"] != "oauth" {
+		t.Fatalf("metadata auth_kind = %#v", auth.Metadata["auth_kind"])
+	}
+	if auth.Metadata["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("metadata base_url = %#v", auth.Metadata["base_url"])
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if persisted["auth_kind"] != "oauth" || persisted["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("persisted xai fields = %#v", persisted)
+	}
+}
+
+func TestRegistrarRegisterFileNormalizesClaudeAndKimiOAuth(t *testing.T) {
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	cases := []struct {
+		name     string
+		file     string
+		provider string
+		payload  map[string]any
+	}{
+		{
+			name:     "claude",
+			file:     "claude-import.json",
+			provider: "claude",
+			payload: map[string]any{
+				"type":          "claude",
+				"email":         "claude@import.example",
+				"access_token":  "claude-access",
+				"refresh_token": "claude-refresh",
+			},
+		},
+		{
+			name:     "kimi",
+			file:     "kimi-import.json",
+			provider: "kimi",
+			payload: map[string]any{
+				"type":          "kimi",
+				"access_token":  "kimi-access",
+				"refresh_token": "kimi-refresh",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(authDir, tc.file)
+			data, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if err := (Registrar{Manager: manager, AuthDir: authDir}).RegisterFile(context.Background(), path, data); err != nil {
+				t.Fatalf("RegisterFile: %v", err)
+			}
+			auth, ok := manager.GetByID(tc.file)
+			if !ok || auth == nil {
+				t.Fatal("auth not found")
+			}
+			if auth.Provider != tc.provider {
+				t.Fatalf("provider = %q, want %q", auth.Provider, tc.provider)
+			}
+			if auth.Attributes["auth_kind"] != "oauth" {
+				t.Fatalf("auth_kind attribute = %q", auth.Attributes["auth_kind"])
+			}
+			if auth.Metadata["auth_kind"] != "oauth" {
+				t.Fatalf("metadata auth_kind = %#v", auth.Metadata["auth_kind"])
+			}
+		})
+	}
+}

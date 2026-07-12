@@ -220,6 +220,97 @@ func TestFileTokenStoreListNormalizesOpenAIBundleJSONForCodex(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreListNormalizesXAIImportMetadata(t *testing.T) {
+	dir := t.TempDir()
+	fileName := "xai-import.json"
+	// Simulate a cross-tenant downloaded file missing runtime fields.
+	data, err := json.Marshal(map[string]any{
+		"type":          "xai",
+		"email":         "disk@example.com",
+		"access_token":  "access",
+		"refresh_token": "refresh",
+		"sub":           "sub-disk",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "xai" || auth.FileName != fileName {
+		t.Fatalf("provider/FileName = %q/%q", auth.Provider, auth.FileName)
+	}
+	if auth.Attributes["auth_kind"] != "oauth" {
+		t.Fatalf("auth_kind = %q", auth.Attributes["auth_kind"])
+	}
+	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("base_url = %q", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["using_api"] != "false" {
+		t.Fatalf("using_api = %q", auth.Attributes["using_api"])
+	}
+	if auth.Metadata["auth_kind"] != "oauth" || auth.Metadata["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("metadata = %#v", auth.Metadata)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if persisted["auth_kind"] != "oauth" || persisted["type"] != "xai" {
+		t.Fatalf("persisted = %#v", persisted)
+	}
+}
+
+func TestNormalizeAuthMetadataXAIAndClaude(t *testing.T) {
+	t.Parallel()
+	xai := NormalizeAuthMetadata(map[string]any{
+		"type":          "xai",
+		"access_token":  "a",
+		"refresh_token": "r",
+	}, "xai")
+	if xai["auth_kind"] != "oauth" || xai["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("xai normalize = %#v", xai)
+	}
+	if xai["using_api"] != false {
+		t.Fatalf("xai using_api = %#v, want false", xai["using_api"])
+	}
+	if xai["token_endpoint"] != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("token_endpoint = %#v", xai["token_endpoint"])
+	}
+
+	claude := NormalizeAuthMetadata(map[string]any{
+		"access_token":  "a",
+		"refresh_token": "r",
+		"email":         "c@example.com",
+	}, "claude")
+	if claude["type"] != "claude" || claude["auth_kind"] != "oauth" {
+		t.Fatalf("claude normalize = %#v", claude)
+	}
+
+	kimi := NormalizeAuthMetadata(map[string]any{
+		"refresh_token": "r",
+	}, "kimi")
+	if kimi["type"] != "kimi" || kimi["auth_kind"] != "oauth" {
+		t.Fatalf("kimi normalize = %#v", kimi)
+	}
+}
+
 func TestFileTokenStoreSavePersistsRoutingMetadata(t *testing.T) {
 	dir := t.TempDir()
 	fileName := "claude-pro.json"

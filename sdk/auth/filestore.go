@@ -192,15 +192,15 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider := InferAuthProvider(metadata)
-	if provider == "codex" {
-		normalized := NormalizeAuthMetadata(metadata, provider)
-		if !reflect.DeepEqual(metadata, normalized) {
-			metadata = normalized
-			if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-				if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-					_, _ = file.Write(raw)
-					_ = file.Close()
-				}
+	// Normalize on every disk load so imported OAuth JSON (xai/claude/kimi/gemini/codex)
+	// converges to the same shape as a fresh login after restart or cross-tenant copy.
+	normalized := NormalizeAuthMetadata(metadata, provider)
+	if !reflect.DeepEqual(metadata, normalized) {
+		metadata = normalized
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
+				_, _ = file.Write(raw)
+				_ = file.Close()
 			}
 		}
 	}
@@ -255,17 +255,47 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		Label:            s.labelFor(metadata),
 		Status:           status,
 		Disabled:         disabled,
-		Attributes:       map[string]string{"path": path},
+		Attributes:       buildFileAuthAttributes(path, metadata),
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
-	if email, ok := metadata["email"].(string); ok && email != "" {
-		auth.Attributes["email"] = email
-	}
 	return auth, nil
+}
+
+// buildFileAuthAttributes keeps disk-loaded credentials aligned with OAuth login
+// and management upload registration (auth_kind/base_url/using_api/email).
+func buildFileAuthAttributes(path string, metadata map[string]any) map[string]string {
+	attrs := map[string]string{"path": path}
+	if email := metadataString(metadata, "email"); email != "" {
+		attrs["email"] = email
+	}
+	if authKind := metadataString(metadata, "auth_kind", "authKind"); authKind != "" {
+		attrs["auth_kind"] = authKind
+	}
+	if baseURL := metadataString(metadata, "base_url", "base-url", "baseUrl"); baseURL != "" {
+		attrs["base_url"] = baseURL
+	}
+	if apiKey := metadataString(metadata, "api_key", "api-key", "apiKey"); apiKey != "" {
+		attrs["api_key"] = apiKey
+	}
+	if raw, ok := metadata["using_api"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			if value {
+				attrs["using_api"] = "true"
+			} else {
+				attrs["using_api"] = "false"
+			}
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				attrs["using_api"] = trimmed
+			}
+		}
+	}
+	return attrs
 }
 
 func metadataString(metadata map[string]any, keys ...string) string {
@@ -314,15 +344,151 @@ func isCodexOAuthMetadata(metadata map[string]any) bool {
 
 // NormalizeAuthMetadata fills canonical fields expected by provider executors
 // while preserving any source-specific metadata that may be useful later.
+// Imported OAuth JSON (cross-tenant upload) must produce the same shape as a
+// fresh login, otherwise executors and management quota calls fail silently.
 func NormalizeAuthMetadata(metadata map[string]any, provider string) map[string]any {
 	if len(metadata) == 0 {
 		return metadata
 	}
 	normalized := maps.Clone(metadata)
-	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
 		normalizeCodexAuthMetadata(normalized)
+	case "xai", "x-ai", "grok":
+		normalizeXAIAuthMetadata(normalized)
+	case "claude", "anthropic":
+		normalizeClaudeAuthMetadata(normalized)
+	case "kimi":
+		normalizeKimiAuthMetadata(normalized)
+	case "gemini-cli", "gemini", "antigravity":
+		normalizeGeminiFamilyAuthMetadata(normalized, provider)
 	}
 	return normalized
+}
+
+func normalizeXAIAuthMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	metadata["type"] = "xai"
+	if metadataString(metadata, "auth_kind", "authKind") == "" {
+		// OAuth credential files always carry refresh_token; API-key files use api_key.
+		if metadataString(metadata, "refresh_token", "refreshToken") != "" ||
+			metadataString(metadata, "access_token", "accessToken") != "" {
+			metadata["auth_kind"] = "oauth"
+		} else if metadataString(metadata, "api_key", "apiKey") != "" {
+			metadata["auth_kind"] = "api_key"
+		}
+	} else if kind := metadataString(metadata, "auth_kind", "authKind"); kind != "" {
+		metadata["auth_kind"] = kind
+	}
+	if metadataString(metadata, "base_url", "baseUrl") == "" {
+		metadata["base_url"] = "https://api.x.ai/v1"
+	} else if baseURL := metadataString(metadata, "base_url", "baseUrl"); baseURL != "" {
+		metadata["base_url"] = baseURL
+	}
+	if metadataString(metadata, "token_endpoint", "tokenEndpoint") == "" {
+		metadata["token_endpoint"] = "https://auth.x.ai/oauth2/token"
+	}
+	if email := metadataString(metadata, "email"); email != "" {
+		metadata["email"] = email
+	}
+	if sub := metadataString(metadata, "sub", "subject", "user_id", "userId"); sub != "" {
+		metadata["sub"] = sub
+	}
+	// Prefer JWT claims when local fields are missing or stale after export/import.
+	normalizeXAIMetadataFromJWT(metadataString(metadata, "access_token", "accessToken"), metadata)
+	normalizeXAIMetadataFromJWT(metadataString(metadata, "id_token", "idToken"), metadata)
+	// OAuth credentials default to Grok Build (using_api=false) when unset.
+	if _, ok := metadata["using_api"]; !ok {
+		if strings.EqualFold(metadataString(metadata, "auth_kind"), "oauth") {
+			metadata["using_api"] = false
+		}
+	}
+}
+
+func normalizeXAIMetadataFromJWT(token string, metadata map[string]any) {
+	claims, ok := parseJWTClaimsMap(token)
+	if !ok {
+		return
+	}
+	if metadataString(metadata, "sub") == "" {
+		if sub, ok := claims["sub"].(string); ok && strings.TrimSpace(sub) != "" {
+			metadata["sub"] = strings.TrimSpace(sub)
+		} else if principal, ok := claims["principal_id"].(string); ok && strings.TrimSpace(principal) != "" {
+			metadata["sub"] = strings.TrimSpace(principal)
+		}
+	}
+	if metadataString(metadata, "email") == "" {
+		if email, ok := claims["email"].(string); ok && strings.TrimSpace(email) != "" {
+			metadata["email"] = strings.TrimSpace(email)
+		}
+	}
+	if metadataString(metadata, "expired") == "" {
+		if exp, ok := jwtNumericClaim(claims, "exp"); ok && exp > 0 {
+			metadata["expired"] = time.Unix(exp, 0).UTC().Format(time.RFC3339)
+		}
+	}
+}
+
+func normalizeClaudeAuthMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	if metadataString(metadata, "type") == "" {
+		metadata["type"] = "claude"
+	}
+	if email := metadataString(metadata, "email"); email != "" {
+		metadata["email"] = email
+	}
+	if metadataString(metadata, "auth_kind", "authKind") == "" {
+		if metadataString(metadata, "refresh_token", "refreshToken") != "" ||
+			metadataString(metadata, "access_token", "accessToken") != "" {
+			metadata["auth_kind"] = "oauth"
+		}
+	}
+}
+
+func normalizeKimiAuthMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	if metadataString(metadata, "type") == "" {
+		metadata["type"] = "kimi"
+	}
+	if metadataString(metadata, "auth_kind", "authKind") == "" {
+		if metadataString(metadata, "refresh_token", "refreshToken") != "" ||
+			metadataString(metadata, "access_token", "accessToken") != "" {
+			metadata["auth_kind"] = "oauth"
+		}
+	}
+}
+
+func normalizeGeminiFamilyAuthMetadata(metadata map[string]any, provider string) {
+	if metadata == nil {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "gemini"
+	}
+	if metadataString(metadata, "type") == "" {
+		metadata["type"] = provider
+	}
+	if metadataString(metadata, "auth_kind", "authKind") == "" {
+		if metadataString(metadata, "refresh_token", "refreshToken") != "" ||
+			hasNestedRefreshToken(metadata) {
+			metadata["auth_kind"] = "oauth"
+		}
+	}
+}
+
+func hasNestedRefreshToken(metadata map[string]any) bool {
+	tokenRaw, ok := metadata["token"].(map[string]any)
+	if !ok || tokenRaw == nil {
+		return false
+	}
+	return metadataString(tokenRaw, "refresh_token", "refreshToken") != ""
 }
 
 func normalizeCodexAuthMetadata(metadata map[string]any) {

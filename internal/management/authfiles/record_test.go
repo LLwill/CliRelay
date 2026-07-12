@@ -126,3 +126,78 @@ func TestChannelLabelFromMetadataFallbacks(t *testing.T) {
 		t.Fatalf("provider fallback = %q, want codex", got)
 	}
 }
+
+func TestBuildRecordXAIImportMapsOAuthAttributes(t *testing.T) {
+	authDir := t.TempDir()
+	tenantDir := filepath.Join(authDir, "tenant-b")
+	if err := os.MkdirAll(tenantDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	path := filepath.Join(tenantDir, "xai-user.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	metadata := map[string]any{
+		"type":          "xai",
+		"email":         "grok@example.com",
+		"auth_kind":     "oauth",
+		"base_url":      "https://api.x.ai/v1",
+		"using_api":     false,
+		"access_token":  "access",
+		"refresh_token": "refresh",
+		"sub":           "principal-1",
+	}
+
+	auth := BuildRecord(RecordOptions{
+		AuthDir:  authDir,
+		TenantID: "tenant-b",
+		Path:     path,
+		Provider: "xai",
+		Metadata: metadata,
+	})
+	if auth == nil {
+		t.Fatal("BuildRecord() = nil")
+	}
+	// FileName must be tenant-relative so EnsureIndex matches disk reload / quota probes.
+	if auth.ID != "tenant-b/xai-user.json" || auth.FileName != "tenant-b/xai-user.json" {
+		t.Fatalf("ID/FileName = %q/%q, want tenant-b/xai-user.json", auth.ID, auth.FileName)
+	}
+	if auth.Disabled {
+		t.Fatal("Disabled = true, want false")
+	}
+	if auth.Attributes["auth_kind"] != "oauth" {
+		t.Fatalf("auth_kind attribute = %q", auth.Attributes["auth_kind"])
+	}
+	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("base_url attribute = %q", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["using_api"] != "false" {
+		t.Fatalf("using_api attribute = %q", auth.Attributes["using_api"])
+	}
+	if auth.Attributes["email"] != "grok@example.com" {
+		t.Fatalf("email attribute = %q", auth.Attributes["email"])
+	}
+	if auth.Label != "grok@example.com" {
+		t.Fatalf("Label = %q", auth.Label)
+	}
+}
+
+func TestBuildRecordDisabledStatusFromMetadata(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "disabled.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	auth := BuildRecord(RecordOptions{
+		AuthDir:  authDir,
+		Path:     path,
+		Provider: "claude",
+		Metadata: map[string]any{"disabled": true, "email": "off@example.com"},
+	})
+	if auth == nil {
+		t.Fatal("BuildRecord() = nil")
+	}
+	if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled/status = %v/%q", auth.Disabled, auth.Status)
+	}
+}

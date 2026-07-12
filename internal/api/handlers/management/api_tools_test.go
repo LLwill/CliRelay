@@ -383,6 +383,153 @@ func TestResolveTokenForAuth_Claude_SkipsRefreshWhenTokenValid(t *testing.T) {
 	}
 }
 
+func TestResolveTokenForAuth_XAI_RefreshesExpiredToken(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			t.Fatalf("unexpected content-type: %s", ct)
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		values, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if values.Get("grant_type") != "refresh_token" {
+			t.Fatalf("unexpected grant_type: %s", values.Get("grant_type"))
+		}
+		if values.Get("refresh_token") != "xai-refresh" {
+			t.Fatalf("unexpected refresh_token: %s", values.Get("refresh_token"))
+		}
+		if values.Get("client_id") == "" {
+			t.Fatal("expected client_id")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-xai-token",
+			"refresh_token": "xai-refresh-2",
+			"expires_in":    int64(3600),
+			"token_type":    "Bearer",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "xai-test.json",
+		FileName: "xai-test.json",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"type":           "xai",
+			"auth_kind":      "oauth",
+			"access_token":   "old-xai-token",
+			"refresh_token":  "xai-refresh",
+			"token_endpoint": srv.URL,
+			"expired":        time.Now().Add(-time.Hour).Format(time.RFC3339),
+			"email":          "old@example.com",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{cfg: &config.Config{}, authManager: manager}
+	token, err := h.APITools().resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "new-xai-token" {
+		t.Fatalf("expected refreshed token, got %q", token)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 refresh call, got %d", callCount)
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth in manager after update")
+	}
+	if got := tokenValueFromMetadata(updated.Metadata); got != "new-xai-token" {
+		t.Fatalf("expected manager metadata updated, got %q", got)
+	}
+	if updated.Metadata["auth_kind"] != "oauth" {
+		t.Fatalf("auth_kind = %#v", updated.Metadata["auth_kind"])
+	}
+}
+
+func TestResolveTokenForAuth_XAI_SkipsRefreshWhenTokenValid(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	auth := &coreauth.Auth{
+		ID:       "xai-valid.json",
+		FileName: "xai-valid.json",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"type":           "xai",
+			"auth_kind":      "oauth",
+			"access_token":   "ok-xai-token",
+			"refresh_token":  "xai-refresh",
+			"token_endpoint": srv.URL,
+			"expired":        time.Now().Add(30 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	h := &Handler{cfg: &config.Config{}}
+	token, err := h.APITools().resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "ok-xai-token" {
+		t.Fatalf("expected existing token, got %q", token)
+	}
+	if callCount != 0 {
+		t.Fatalf("expected no refresh calls, got %d", callCount)
+	}
+}
+
+func TestResolveTokenForAuth_XAI_APIKeyDoesNotRefresh(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	auth := &coreauth.Auth{
+		ID:       "xai-key.json",
+		FileName: "xai-key.json",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key": "xai-api-key-value",
+		},
+		Metadata: map[string]any{
+			"type":      "xai",
+			"auth_kind": "api_key",
+			"api_key":   "xai-api-key-value",
+		},
+	}
+	h := &Handler{cfg: &config.Config{}}
+	token, err := h.APITools().resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "xai-api-key-value" {
+		t.Fatalf("expected api key, got %q", token)
+	}
+	if callCount != 0 {
+		t.Fatalf("expected no refresh calls, got %d", callCount)
+	}
+}
+
 func TestAPICallReconcilesCodexWhamUsagePlanType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
