@@ -1,6 +1,41 @@
 package management
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+)
+
+func TestDeniesTenantResourceScopeAllowsPlatformAdminOnGlobalLogs(t *testing.T) {
+	businessTenant := identity.Principal{
+		PlatformAdmin:   true,
+		EffectiveTenant: identity.Tenant{ID: "tenant-potato"},
+		HomeTenant:      identity.Tenant{ID: identity.SystemTenantID},
+	}
+	if deniesTenantResourceScope(businessTenant, "/v0/management/logs") {
+		t.Fatal("platform super-admin switched into a business tenant must still reach process-global /logs")
+	}
+
+	tenantOperator := identity.Principal{
+		PlatformAdmin:   false,
+		EffectiveTenant: identity.Tenant{ID: "tenant-potato"},
+		HomeTenant:      identity.Tenant{ID: "tenant-potato"},
+	}
+	if !deniesTenantResourceScope(tenantOperator, "/v0/management/logs") {
+		t.Fatal("non-platform tenant session must not reach process-global /logs")
+	}
+	if deniesTenantResourceScope(tenantOperator, "/v0/management/usage/logs") {
+		t.Fatal("tenant-scoped request logs must stay available to business tenants")
+	}
+
+	systemSession := identity.Principal{
+		PlatformAdmin:   false,
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+	}
+	if deniesTenantResourceScope(systemSession, "/v0/management/logs") {
+		t.Fatal("system-tenant session must reach process-global /logs")
+	}
+}
 
 func TestTenantScopedManagementPathIncludesProviderRuntimeRoutes(t *testing.T) {
 	for _, path := range []string{

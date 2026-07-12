@@ -495,6 +495,17 @@ func isTenantGovernancePath(path string) bool {
 		relative == "/permissions" || relative == "/menus" || strings.HasPrefix(relative, "/menus/") || relative == "/audit-logs"
 }
 
+// deniesTenantResourceScope blocks process-global management routes when the
+// session is acting as a non-system tenant. Platform super-admins are exempt:
+// they may switch into a business tenant for ops without losing access to host
+// logs, global config, and other process-scoped surfaces.
+func deniesTenantResourceScope(principal identity.Principal, path string) bool {
+	if principal.PlatformAdmin || principal.EffectiveTenant.ID == identity.SystemTenantID {
+		return false
+	}
+	return !isTenantScopedManagementPath(path)
+}
+
 func isTenantScopedManagementPath(path string) bool {
 	if isTenantGovernancePath(path) {
 		return true

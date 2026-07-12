@@ -413,9 +413,11 @@ func (h *Handler) authenticateSessionToken(c *gin.Context, token string) bool {
 		identityError(c, identity.ErrPermissionDenied)
 		return false
 	}
-	// Some runtime/config stores remain process-global. Non-system tenants may
-	// only use routes whose complete repository and scheduler paths are tenant-scoped.
-	if principal.EffectiveTenant.ID != identity.SystemTenantID && !isTenantScopedManagementPath(c.Request.URL.Path) {
+	// Some runtime/config stores remain process-global. Business-tenant sessions
+	// may only use fully tenant-scoped routes. Platform super-admins keep access
+	// after tenant switch so ops pages like /logs still work under an effective
+	// business tenant.
+	if deniesTenantResourceScope(principal, c.Request.URL.Path) {
 		h.recordManagementAudit(c, principal, "denied")
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{"code": "tenant_resource_scope_unavailable", "message": "tenant business resources are not enabled for this tenant"}})
 		return false
