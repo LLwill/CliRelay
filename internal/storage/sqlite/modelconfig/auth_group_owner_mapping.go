@@ -1,12 +1,8 @@
 package modelconfig
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
-	"sync"
-
-	log "github.com/sirupsen/logrus"
 )
 
 type AuthGroupOwnerMappingRow struct {
@@ -15,10 +11,6 @@ type AuthGroupOwnerMappingRow struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-var (
-	authGroupOwnerMappingCache   map[string]AuthGroupOwnerMappingRow
-	authGroupOwnerMappingCacheMu sync.RWMutex
-)
 
 func NormalizeAuthGroupKey(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), "-"))
@@ -81,31 +73,3 @@ func (s Store) DeleteAuthGroupOwnerMapping(authGroup string) error {
 	return err
 }
 
-func reloadAuthGroupOwnerMappingCache(db *sql.DB) {
-	rows, err := db.Query("SELECT auth_group, owner, updated_at FROM auth_group_model_owner_mappings")
-	if err != nil {
-		log.Errorf("sqlite/modelconfig: load auth group owner mapping cache: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	cache := make(map[string]AuthGroupOwnerMappingRow)
-	for rows.Next() {
-		var row AuthGroupOwnerMappingRow
-		if err := rows.Scan(&row.AuthGroup, &row.Owner, &row.UpdatedAt); err != nil {
-			log.Errorf("sqlite/modelconfig: scan auth group owner mapping row: %v", err)
-			continue
-		}
-		row.AuthGroup = NormalizeAuthGroupKey(row.AuthGroup)
-		row.Owner = NormalizeModelOwnerValue(row.Owner)
-		if row.AuthGroup == "" || row.Owner == "" {
-			continue
-		}
-		cache[row.AuthGroup] = row
-	}
-
-	authGroupOwnerMappingCacheMu.Lock()
-	authGroupOwnerMappingCache = cache
-	authGroupOwnerMappingCacheMu.Unlock()
-	log.Infof("sqlite/modelconfig: loaded %d auth group owner mappings into cache", len(cache))
-}

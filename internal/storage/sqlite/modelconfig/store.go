@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -100,14 +99,6 @@ CREATE TABLE IF NOT EXISTS model_openrouter_sync_state (
 );
 `
 
-var (
-	modelConfigCache   map[string]ModelConfigRow
-	modelConfigCacheMu sync.RWMutex
-
-	modelOwnerPresetCache   map[string]ModelOwnerPresetRow
-	modelOwnerPresetCacheMu sync.RWMutex
-)
-
 var defaultOwnerLabels = map[string]string{
 	"anthropic":    "Anthropic",
 	"openai":       "OpenAI",
@@ -158,9 +149,6 @@ func InitTables(db *sql.DB) {
 	seedDefaultModelConfigRows(db)
 	mergeLegacyPricingIntoModelConfigs(db)
 	repairDefaultPerCallModelConfigRows(db)
-	reloadModelConfigCache(db)
-	reloadModelOwnerPresetCache(db)
-	reloadAuthGroupOwnerMappingCache(db)
 }
 
 func NormalizeModelOwnerValue(value string) string {
@@ -240,7 +228,6 @@ func UpsertLegacyPricingIntoModelConfigForTenant(db *sql.DB, tenantID, modelID s
 		log.Warnf("sqlite/modelconfig: sync legacy pricing into model config %s: %v", modelID, err)
 		return
 	}
-	reloadModelConfigCache(db)
 }
 
 func (s Store) ListModelConfigs() []ModelConfigRow {
@@ -851,82 +838,7 @@ func scanModelConfigRow(scanner interface{ Scan(...any) error }) (ModelConfigRow
 	return row, true
 }
 
-func reloadModelConfigCache(db *sql.DB) {
-	rows, err := db.Query(
-		`SELECT model_id, owned_by, description, enabled, input_modalities, output_modalities, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, cache_read_price_per_million, cache_write_price_per_million, price_per_call, source, updated_at
-		 FROM model_configs`,
-	)
-	if err != nil {
-		log.Errorf("sqlite/modelconfig: load model config cache: %v", err)
-		return
-	}
-	defer rows.Close()
 
-	cache := make(map[string]ModelConfigRow)
-	for rows.Next() {
-		var row ModelConfigRow
-		var enabled int
-		var inputModalities string
-		var outputModalities string
-		if err := rows.Scan(
-			&row.ModelID,
-			&row.OwnedBy,
-			&row.Description,
-			&enabled,
-			&inputModalities,
-			&outputModalities,
-			&row.PricingMode,
-			&row.InputPricePerMillion,
-			&row.OutputPricePerMillion,
-			&row.CachedPricePerMillion,
-			&row.CacheReadPricePerMillion,
-			&row.CacheWritePricePerMillion,
-			&row.PricePerCall,
-			&row.Source,
-			&row.UpdatedAt,
-		); err != nil {
-			log.Errorf("sqlite/modelconfig: scan model config row: %v", err)
-			continue
-		}
-		row.Enabled = intToBool(enabled)
-		row.InputModalities = decodeModelModalities(inputModalities)
-		row.OutputModalities = decodeModelModalities(outputModalities)
-		row.PricingMode = NormalizePricingMode(row.PricingMode)
-		cache[row.ModelID] = row
-	}
-
-	modelConfigCacheMu.Lock()
-	modelConfigCache = cache
-	modelConfigCacheMu.Unlock()
-	log.Infof("sqlite/modelconfig: loaded %d model config entries into cache", len(cache))
-}
-
-func reloadModelOwnerPresetCache(db *sql.DB) {
-	rows, err := db.Query("SELECT value, label, description, enabled, updated_at FROM model_owner_presets")
-	if err != nil {
-		log.Errorf("sqlite/modelconfig: load model owner preset cache: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	cache := make(map[string]ModelOwnerPresetRow)
-	for rows.Next() {
-		var row ModelOwnerPresetRow
-		var enabled int
-		if err := rows.Scan(&row.Value, &row.Label, &row.Description, &enabled, &row.UpdatedAt); err != nil {
-			log.Errorf("sqlite/modelconfig: scan owner preset row: %v", err)
-			continue
-		}
-		row.Value = NormalizeModelOwnerValue(row.Value)
-		row.Enabled = intToBool(enabled)
-		cache[row.Value] = row
-	}
-
-	modelOwnerPresetCacheMu.Lock()
-	modelOwnerPresetCache = cache
-	modelOwnerPresetCacheMu.Unlock()
-	log.Infof("sqlite/modelconfig: loaded %d model owner presets into cache", len(cache))
-}
 
 func sqliteColumnExists(db *sql.DB, tableName, columnName string) bool {
 	rows, err := db.Query("PRAGMA table_info(" + tableName + ")")
