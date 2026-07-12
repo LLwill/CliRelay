@@ -371,6 +371,35 @@ func (h *Handler) GetRoles(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
+func (h *Handler) GetMenus(c *gin.Context) {
+	items, err := h.identity().ListMenus(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h *Handler) PatchMenu(c *gin.Context) {
+	principal, _ := principalFromContext(c)
+	var body struct {
+		Visible   bool  `json:"visible"`
+		Enabled   bool  `json:"enabled"`
+		SortOrder int   `json:"sort_order"`
+		Version   int64 `json:"version"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	menu, err := h.identity().UpdateMenu(c.Request.Context(), principal, c.Param("code"), body.Visible, body.Enabled, body.SortOrder, body.Version)
+	if err != nil {
+		identityError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, menu)
+}
+
 func (h *Handler) GetPermissions(c *gin.Context) {
 	items, err := h.identity().ListPermissions(c.Request.Context())
 	if err != nil {
@@ -440,7 +469,7 @@ func isTenantGovernancePath(path string) bool {
 	return relative == "/tenants" || strings.HasPrefix(relative, "/tenants/") ||
 		relative == "/users" || strings.HasPrefix(relative, "/users/") ||
 		relative == "/roles" || strings.HasPrefix(relative, "/roles/") ||
-		relative == "/permissions" || relative == "/audit-logs"
+		relative == "/permissions" || relative == "/menus" || strings.HasPrefix(relative, "/menus/") || relative == "/audit-logs"
 }
 
 func isTenantScopedManagementPath(path string) bool {
@@ -529,10 +558,16 @@ func permissionForManagementRequest(method, path string) string {
 		return "tenant.users.update"
 	case relative == "/audit-logs":
 		return "tenant.audit.read"
+	case relative == "/menus" && method == http.MethodGet:
+		return "platform.menus.read"
+	case strings.HasPrefix(relative, "/menus/"):
+		return "platform.menus.update"
 	case relative == "/roles" && method == http.MethodGet, relative == "/permissions":
 		return "tenant.roles.read"
 	case relative == "/roles" && method == http.MethodPost:
 		return "tenant.roles.create"
+	case strings.HasSuffix(relative, "/users") && strings.HasPrefix(relative, "/roles/"):
+		return "tenant.users.assign_roles"
 	case strings.HasPrefix(relative, "/roles/") && method == http.MethodDelete:
 		return "tenant.roles.delete"
 	case strings.HasPrefix(relative, "/roles/"):
@@ -659,6 +694,23 @@ func (h *Handler) PutUserRoles(c *gin.Context) {
 		return
 	}
 	if err := h.identity().AssignUserRoles(c.Request.Context(), principal, principal.EffectiveTenant.ID, c.Param("id"), body.RoleIDs); err != nil {
+		identityError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) PutRoleUsers(c *gin.Context) {
+	principal, _ := principalFromContext(c)
+	var body struct {
+		UserIDs []string `json:"user_ids"`
+		Version int64    `json:"version"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.identity().ReplaceRoleUsers(c.Request.Context(), principal, principal.EffectiveTenant.ID, c.Param("id"), body.UserIDs, body.Version); err != nil {
 		identityError(c, err)
 		return
 	}

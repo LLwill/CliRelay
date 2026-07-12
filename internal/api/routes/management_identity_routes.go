@@ -33,10 +33,13 @@ func registerManagementIdentityRoutes(group *gin.RouterGroup, h *managementhandl
 	group.PUT("/users/:id/roles", h.PutUserRoles)
 	group.POST("/users/:id/reset-password", h.PostUserResetPassword)
 
+	group.GET("/menus", h.GetMenus)
+	group.PATCH("/menus/:code", h.PatchMenu)
 	group.GET("/permissions", h.GetPermissions)
 	group.GET("/roles", h.GetRoles)
 	group.POST("/roles", h.PostRole)
 	group.PUT("/roles/:id/permissions", h.PutRolePermissions)
+	group.PUT("/roles/:id/users", h.PutRoleUsers)
 	group.DELETE("/roles/:id", h.DeleteRole)
 	group.GET("/audit-logs", h.GetAuditLogs)
 }

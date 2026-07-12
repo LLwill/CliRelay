@@ -70,4 +70,20 @@ func TestEnsureActorTenantScope(t *testing.T) {
 	}
 }
 
+func TestMenuCatalogReferencesExistingParents(t *testing.T) {
+	seen := make(map[string]bool, len(MenuCatalog))
+	for _, menu := range MenuCatalog {
+		if menu.Code == "" || seen[menu.Code] {
+			t.Fatalf("invalid or duplicate menu code %q", menu.Code)
+		}
+		if menu.ParentCode != "" && !seen[menu.ParentCode] {
+			t.Fatalf("menu %s references parent %s before it is declared", menu.Code, menu.ParentCode)
+		}
+		seen[menu.Code] = true
+	}
+	if !seen[MenuManagementCode] {
+		t.Fatal("menu management entry is missing")
+	}
+}
+
 func ptrTime(value time.Time) *time.Time { return &value }

@@ -9,6 +9,7 @@ func RuntimeMigrations() []Migration {
 		{Version: "202607110003_multi_tenant_constraints", SQL: multiTenantConstraintsSQL},
 		{Version: "202607110004_identity_delete_constraints", SQL: identityDeleteConstraintsSQL},
 		{Version: "202607110005_ccswitch_tenant_primary_key", SQL: ccSwitchTenantPrimaryKeySQL},
+		{Version: "202607120001_dynamic_menus", SQL: dynamicMenusSQL},
 	}
 }
 
@@ -581,4 +582,25 @@ ALTER TABLE audit_logs ADD CONSTRAINT audit_logs_actor_session_id_fkey
 const ccSwitchTenantPrimaryKeySQL = `
 ALTER TABLE ccswitch_import_configs DROP CONSTRAINT IF EXISTS ccswitch_import_configs_pkey;
 ALTER TABLE ccswitch_import_configs ADD PRIMARY KEY (tenant_id, id);
+`
+
+const dynamicMenusSQL = `
+CREATE TABLE IF NOT EXISTS menus (
+  code             TEXT PRIMARY KEY,
+  parent_code      TEXT REFERENCES menus(code) ON DELETE RESTRICT,
+  menu_type        TEXT NOT NULL CHECK (menu_type IN ('directory', 'menu')),
+  path             TEXT NOT NULL DEFAULT '',
+  label_key        TEXT NOT NULL,
+  icon             TEXT NOT NULL DEFAULT '',
+  permission_code  TEXT REFERENCES permissions(code) ON DELETE RESTRICT,
+  sort_order       INTEGER NOT NULL DEFAULT 0,
+  visible          BOOLEAN NOT NULL DEFAULT true,
+  enabled          BOOLEAN NOT NULL DEFAULT true,
+  system_protected BOOLEAN NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  version          BIGINT NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_menus_parent_sort ON menus(parent_code, sort_order, code);
+CREATE INDEX IF NOT EXISTS idx_menus_permission ON menus(permission_code);
 `

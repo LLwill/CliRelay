@@ -173,6 +173,10 @@ func (s *Service) Bootstrap(ctx context.Context, initialPassword string) error {
 		}
 	}
 
+	if err = seedMenus(ctx, tx); err != nil {
+		return err
+	}
+
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO roles (id, tenant_id, code, name, description, scope, system_protected)
 		VALUES (?, ?, 'platform_super_admin', 'Administrator',
@@ -507,6 +511,10 @@ func (s *Service) loadPrincipal(ctx context.Context, userID, sessionID string, e
 		principal.PermissionList = append(principal.PermissionList, permission)
 	}
 	sort.Strings(principal.PermissionList)
+	principal.Menus, err = s.ListPrincipalMenus(ctx, principal)
+	if err != nil {
+		return Principal{}, err
+	}
 	return principal, nil
 }
 

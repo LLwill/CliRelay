@@ -1888,7 +1888,7 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 		authManager: manager,
 	}
 
-	// Facet list should expose both live and orphan options for the same email.
+	// Facet list should collapse the live and historical aliases into one option.
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50", nil)
@@ -1911,33 +1911,18 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &listPayload); err != nil {
 		t.Fatalf("unmarshal list response: %v", err)
 	}
-	if len(listPayload.Filters.ChannelOptions) != 2 {
-		t.Fatalf("channel_options = %#v, want 2 options (live + orphan)", listPayload.Filters.ChannelOptions)
+	if len(listPayload.Filters.ChannelOptions) != 1 {
+		t.Fatalf("channel_options = %#v, want one merged option", listPayload.Filters.ChannelOptions)
 	}
-	var foundOrphan, foundLive bool
-	for _, opt := range listPayload.Filters.ChannelOptions {
-		switch opt.Value {
-		case orphanIndex:
-			foundOrphan = true
-			if opt.Label != "asherandersenloqv@outlook.com" {
-				t.Fatalf("orphan label = %q, want email", opt.Label)
-			}
-			// Orphan has no live meta → no provider / oauth badge.
-			if opt.Provider != "" || opt.AuthType != "" {
-				t.Fatalf("orphan option should have empty provider/auth_type, got %#v", opt)
-			}
-		case liveAuth.Index:
-			foundLive = true
-			if opt.AuthType != "oauth" {
-				t.Fatalf("live option auth_type = %q, want oauth", opt.AuthType)
-			}
-		}
+	option := listPayload.Filters.ChannelOptions[0]
+	if option.Value != liveAuth.Index || option.AuthIndex != liveAuth.Index {
+		t.Fatalf("merged option value/auth_index = %#v, want live index %q", option, liveAuth.Index)
 	}
-	if !foundOrphan || !foundLive {
-		t.Fatalf("channel_options missing live/orphan values: %#v", listPayload.Filters.ChannelOptions)
+	if option.Label != "asherandersenloqv@outlook.com" || option.Provider != "xai" || option.AuthType != "oauth" {
+		t.Fatalf("merged option metadata = %#v", option)
 	}
 
-	// Selecting the orphan auth_index must return the historical rows, not 0.
+	// Old deep links using the orphan index expand to the complete alias group.
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50&channel="+orphanIndex, nil)
@@ -1957,13 +1942,17 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
 		t.Fatalf("unmarshal orphan filtered response: %v", err)
 	}
-	if filtered.Total != 1 || len(filtered.Items) != 1 {
-		t.Fatalf("orphan filtered total/items = %d/%d, want 1/1; body=%s", filtered.Total, len(filtered.Items), rec.Body.String())
+	if filtered.Total != 2 || len(filtered.Items) != 2 {
+		t.Fatalf("orphan filtered total/items = %d/%d, want 2/2; body=%s", filtered.Total, len(filtered.Items), rec.Body.String())
 	}
-	if filtered.Items[0].AuthIndex != orphanIndex {
-		t.Fatalf("orphan filtered auth_index = %q, want %q", filtered.Items[0].AuthIndex, orphanIndex)
+	found := map[string]bool{}
+	for _, item := range filtered.Items {
+		found[item.AuthIndex] = true
+		if item.ChannelName != "asherandersenloqv@outlook.com" {
+			t.Fatalf("orphan filtered channel_name = %q", item.ChannelName)
+		}
 	}
-	if filtered.Items[0].ChannelName != "asherandersenloqv@outlook.com" {
-		t.Fatalf("orphan filtered channel_name = %q", filtered.Items[0].ChannelName)
+	if !found[orphanIndex] || !found[liveAuth.Index] {
+		t.Fatalf("orphan filter missing alias rows: %#v", filtered.Items)
 	}
 }

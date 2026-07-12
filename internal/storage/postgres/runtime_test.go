@@ -7,8 +7,8 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 7 {
-		t.Fatalf("RuntimeMigrations len = %d, want 7", len(migrations))
+	if len(migrations) != 8 {
+		t.Fatalf("RuntimeMigrations len = %d, want 8", len(migrations))
 	}
 	sqlText := migrations[0].SQL
 	for _, table := range []string{
@@ -62,6 +62,13 @@ func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	ccSwitchConstraintsSQL := migrations[6].SQL
 	if !strings.Contains(ccSwitchConstraintsSQL, "ADD PRIMARY KEY (tenant_id, id)") {
 		t.Fatal("ccswitch tenant primary key migration is missing composite primary key")
+	}
+
+	menuSQL := migrations[7].SQL
+	for _, fragment := range []string{"CREATE TABLE IF NOT EXISTS menus", "permission_code", "idx_menus_parent_sort"} {
+		if !strings.Contains(menuSQL, fragment) {
+			t.Fatalf("dynamic menu migration missing %q", fragment)
+		}
 	}
 
 	identitySQL := migrations[2].SQL

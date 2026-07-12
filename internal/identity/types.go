@@ -55,6 +55,7 @@ type Principal struct {
 	HomeTenant       Tenant          `json:"home_tenant"`
 	EffectiveTenant  Tenant          `json:"effective_tenant"`
 	Roles            []Role          `json:"roles"`
+	Menus            []Menu          `json:"menus"`
 	Permissions      map[string]bool `json:"-"`
 	PermissionList   []string        `json:"permissions"`
 	PlatformAdmin    bool            `json:"platform_admin"`

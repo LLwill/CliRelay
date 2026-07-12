@@ -19,6 +19,8 @@ var PermissionCatalog = []PermissionSeed{
 	{Code: "platform.roles.read", Name: "Read roles across tenants", Scope: "platform", Resource: "roles", Action: "read"},
 	{Code: "platform.roles.manage", Name: "Manage roles across tenants", Scope: "platform", Resource: "roles", Action: "manage", Sensitive: true},
 	{Code: "platform.audit.read", Name: "Read platform audit logs", Scope: "platform", Resource: "audit", Action: "read", Sensitive: true},
+	{Code: "platform.menus.read", Name: "Read menu configuration", Scope: "platform", Resource: "menus", Action: "read"},
+	{Code: "platform.menus.update", Name: "Update menu configuration", Scope: "platform", Resource: "menus", Action: "update", Sensitive: true},
 	{Code: "system.status.read", Name: "Read system status", Scope: "platform", Resource: "system", Action: "read"},
 	{Code: "system.logs.read", Name: "Read system logs", Scope: "platform", Resource: "system_logs", Action: "read", Sensitive: true},
 	{Code: "system.config.read", Name: "Read system configuration", Scope: "platform", Resource: "system_config", Action: "read", Sensitive: true},

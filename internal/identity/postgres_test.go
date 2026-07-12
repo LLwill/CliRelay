@@ -22,7 +22,7 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err = db.Exec(`TRUNCATE audit_logs,user_sessions,user_roles,role_permissions,users,roles,permissions,tenants CASCADE`); err != nil {
+	if _, err = db.Exec(`TRUNCATE audit_logs,user_sessions,user_roles,role_permissions,menus,users,roles,permissions,tenants CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(db)
@@ -50,6 +50,9 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 	if !login.Principal.PlatformAdmin || login.Principal.HomeTenant.ID != SystemTenantID {
 		t.Fatalf("principal=%+v", login.Principal)
 	}
+	if !containsMenu(login.Principal.Menus, MenuManagementCode) {
+		t.Fatalf("platform principal menus=%+v", login.Principal.Menus)
+	}
 	principal, err := service.Authenticate(ctx, login.AccessToken, "")
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +68,9 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if containsMenu(tenantAdminLogin.Principal.Menus, MenuManagementCode) || !containsMenu(tenantAdminLogin.Principal.Menus, "governance.users") {
+		t.Fatalf("tenant admin menus=%+v", tenantAdminLogin.Principal.Menus)
+	}
 	if err = service.ChangePassword(ctx, tenantAdminLogin.Principal, "tenant-password-123", "tenant-password-456"); err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +83,11 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tenantAdminRoleID string
+	var tenantAdminRoleVersion int64
 	for _, role := range roles {
 		if role.Code == "tenant_admin" {
 			tenantAdminRoleID = role.ID
+			tenantAdminRoleVersion = role.Version
 		}
 	}
 	if tenantAdminRoleID == "" {
@@ -118,6 +126,30 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 	if err = service.AssignUserRoles(ctx, limitedPrincipal, tenant.ID, rolelessUser.ID, []string{tenantAdminRoleID}); !errors.Is(err, ErrPermissionDenied) {
 		t.Fatalf("assign non-delegable role err=%v", err)
 	}
+	if err = service.ReplaceRoleUsers(ctx, tenantAdmin, tenant.ID, limitedRole.ID, []string{rolelessUser.ID}, limitedRole.Version); err != nil {
+		t.Fatalf("replace role users: %v", err)
+	}
+	users, err = service.ListUsers(ctx, tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roleAssigned bool
+	for _, user := range users {
+		if user.ID == rolelessUser.ID {
+			for _, roleID := range user.RoleIDs {
+				roleAssigned = roleAssigned || roleID == limitedRole.ID
+			}
+		}
+	}
+	if !roleAssigned {
+		t.Fatalf("role %s was not assigned to user %s", limitedRole.ID, rolelessUser.ID)
+	}
+	if err = service.ReplaceRoleUsers(ctx, tenantAdmin, tenant.ID, limitedRole.ID, nil, limitedRole.Version); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("replace role users stale version err=%v", err)
+	}
+	if err = service.ReplaceRoleUsers(ctx, tenantAdmin, tenant.ID, tenantAdminRoleID, nil, tenantAdminRoleVersion); !errors.Is(err, ErrProtectedResource) {
+		t.Fatalf("remove all tenant admins err=%v", err)
+	}
 	if err = service.DeleteUser(ctx, tenantAdmin, tenant.ID, limitedUser.ID); err != nil {
 		t.Fatalf("delete audited user: %v", err)
 	}
@@ -128,4 +160,13 @@ func TestPostgresIdentityLifecycle(t *testing.T) {
 	if _, err = service.Login(ctx, "tenant-admin", "tenant-password-456", false, "test"); !errors.Is(err, ErrTenantExpired) {
 		t.Fatalf("expired login err=%v", err)
 	}
+}
+
+func containsMenu(menus []Menu, code string) bool {
+	for _, menu := range menus {
+		if menu.Code == code {
+			return true
+		}
+	}
+	return false
 }

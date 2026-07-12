@@ -136,6 +136,114 @@ func (s *Service) AssignUserRoles(ctx context.Context, actor Principal, tenantID
 	return nil
 }
 
+func (s *Service) ReplaceRoleUsers(ctx context.Context, actor Principal, tenantID, roleID string, userIDs []string, version int64) error {
+	canManage := actor.Has("platform.users.manage") || (actor.Has("tenant.users.assign_roles") && actor.Has("tenant.roles.update"))
+	if !canManage {
+		return ErrPermissionDenied
+	}
+	if err := ensureActorTenantScope(actor, tenantID); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var roleTenant string
+	var protected bool
+	var currentVersion int64
+	if err = tx.QueryRowContext(ctx, `SELECT tenant_id,system_protected,version FROM roles WHERE id=? FOR UPDATE`, roleID).Scan(&roleTenant, &protected, &currentVersion); err != nil {
+		return err
+	}
+	if roleTenant != tenantID {
+		return ErrTenantScope
+	}
+	if currentVersion != version {
+		return ErrVersionConflict
+	}
+	if roleID == SystemRoleID {
+		return ErrProtectedResource
+	}
+	if err = ensureRolesDelegable(ctx, tx, actor, tenantID, []string{roleID}); err != nil {
+		return err
+	}
+
+	selected := make(map[string]struct{}, len(userIDs))
+	activeSelected := 0
+	for _, userID := range userIDs {
+		userID = strings.TrimSpace(userID)
+		if userID == "" {
+			return fmt.Errorf("%w: user id is required", ErrValidation)
+		}
+		if userID == SystemUserID {
+			return ErrProtectedResource
+		}
+		if _, exists := selected[userID]; exists {
+			continue
+		}
+		var userTenant, status string
+		if err = tx.QueryRowContext(ctx, `SELECT tenant_id,status FROM users WHERE id=?`, userID).Scan(&userTenant, &status); err != nil {
+			return err
+		}
+		if userTenant != tenantID {
+			return ErrTenantScope
+		}
+		selected[userID] = struct{}{}
+		if status == "active" {
+			activeSelected++
+		}
+	}
+	if protected && activeSelected == 0 {
+		return ErrProtectedResource
+	}
+
+	affected := make(map[string]struct{}, len(selected))
+	rows, err := tx.QueryContext(ctx, `SELECT user_id FROM user_roles WHERE role_id=?`, roleID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var userID string
+		if err = rows.Scan(&userID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		affected[userID] = struct{}{}
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for userID := range selected {
+		affected[userID] = struct{}{}
+	}
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM user_roles WHERE role_id=?`, roleID); err != nil {
+		return err
+	}
+	for userID := range selected {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO user_roles(user_id,role_id,created_by)VALUES(?,?,?)`, userID, roleID, actor.User.ID); err != nil {
+			return err
+		}
+	}
+	for userID := range affected {
+		if _, err = tx.ExecContext(ctx, `UPDATE users SET updated_at=now(),version=version+1 WHERE id=?`, userID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE roles SET updated_at=now(),version=version+1 WHERE id=?`, roleID); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	s.RecordAudit(ctx, AuditEvent{TenantID: tenantID, ActorKind: actor.Kind, ActorUserID: actor.User.ID, ActorSessionID: actor.SessionID, Action: "role.users.replace", ResourceType: "role", ResourceID: roleID, Result: "success"})
+	return nil
+}
+
 func (s *Service) UpdateUserStatus(ctx context.Context, actor Principal, tenantID, userID, status string, version int64) (User, error) {
 	if !actor.Has("tenant.users.update") && !actor.Has("platform.users.manage") {
 		return User{}, ErrPermissionDenied
