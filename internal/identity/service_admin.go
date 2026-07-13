@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -48,6 +49,13 @@ func (s *Service) RecordAudit(ctx context.Context, event AuditEvent) {
 	if s == nil || s.db == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Domain callers often omit RequestID; pull from request context when present.
+	if strings.TrimSpace(event.RequestID) == "" {
+		event.RequestID = logging.GetRequestID(ctx)
+	}
 	var tenantID, actorUserID, actorSessionID any
 	if event.TenantID != "" {
 		tenantID = event.TenantID
@@ -79,11 +87,7 @@ func (s *Service) RecordAudit(ctx context.Context, event AuditEvent) {
 	if err != nil {
 		changesJSON = []byte("{}")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	} else {
-		ctx = context.WithoutCancel(ctx)
-	}
+	ctx = context.WithoutCancel(ctx)
 	auditCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if _, err := s.db.ExecContext(auditCtx, `INSERT INTO audit_logs (tenant_id,actor_kind,actor_user_id,actor_session_id,action,resource_type,resource_id,result,request_id,changes) VALUES (?,?,?,?,?,?,?,?,?,?::jsonb)`, tenantID, event.ActorKind, actorUserID, actorSessionID, event.Action, event.ResourceType, event.ResourceID, event.Result, event.RequestID, string(changesJSON)); err != nil {

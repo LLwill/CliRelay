@@ -98,9 +98,18 @@ func (h *Handler) recordManagementAudit(c *gin.Context, principal identity.Princ
 	if result == "success" && !write && !sensitiveRead {
 		return
 	}
+	// Prefer middleware-assigned ID; fall back to generating one so audit rows stay correlatable
+	// even if request-id middleware skipped this path (e.g. older deployments / test routers).
 	requestID := logging.GetGinRequestID(c)
 	if requestID == "" {
 		requestID = logging.GetRequestID(c.Request.Context())
+	}
+	if requestID == "" {
+		requestID = logging.GenerateRequestID()
+		logging.SetGinRequestID(c, requestID)
+		if c.Request != nil {
+			c.Request = c.Request.WithContext(logging.WithRequestID(c.Request.Context(), requestID))
+		}
 	}
 	routePath := strings.TrimPrefix(c.Request.URL.Path, "/v0/management")
 	handlerName := c.Request.Method + " " + routePath

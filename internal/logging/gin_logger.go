@@ -30,10 +30,11 @@ const skipGinLogKey = "__gin_skip_request_logging__"
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
-// client IP, and any error messages. Request ID is only added for AI API requests.
+// client IP, and any error messages. Request ID is generated for AI API and management
+// paths (management needs it for audit-log correlation).
 //
-// Output format (AI API): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
-// Output format (others): [2025-12-23 20:14:10] [info ] | -------- | 200 |       23.559s | ...
+// Output format (tracked): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
+// Output format (others):  [2025-12-23 20:14:10] [info ] | -------- | 200 |       23.559s | ...
 //
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for request logging
@@ -43,9 +44,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 
-		// Only generate request ID for AI API paths
+		// AI API + management: attach request ID for log/audit correlation.
 		var requestID string
-		if isAIAPIPath(path) {
+		if shouldTrackRequestID(path) {
 			requestID = GenerateRequestID()
 			SetGinRequestID(c, requestID)
 			ctx := WithRequestID(c.Request.Context(), requestID)
@@ -106,6 +107,16 @@ func isAIAPIPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// isManagementPath reports management console/API routes that need request IDs for audit logs.
+func isManagementPath(path string) bool {
+	return strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management")
+}
+
+// shouldTrackRequestID reports paths that receive a generated request ID.
+func shouldTrackRequestID(path string) bool {
+	return isAIAPIPath(path) || isManagementPath(path)
 }
 
 // GinLogrusRecovery returns a Gin middleware handler that recovers from panics and logs

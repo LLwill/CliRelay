@@ -97,3 +97,50 @@ func TestGinLogrusLoggerPrefersForwardedClientIPForCDNRequests(t *testing.T) {
 		t.Fatalf("log line = %q, should not use proxy connection IP", line)
 	}
 }
+
+func TestGinLogrusLoggerAssignsRequestIDForManagementPaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var got string
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+	engine.GET("/v0/management/request-log-storage/store-content", func(c *gin.Context) {
+		got = GetGinRequestID(c)
+		if ctxID := GetRequestID(c.Request.Context()); ctxID != got {
+			t.Errorf("context request id = %q, gin = %q", ctxID, got)
+		}
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/request-log-storage/store-content", nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if got == "" {
+		t.Fatal("expected management path to receive a request ID")
+	}
+	if len(got) != 8 {
+		t.Fatalf("request ID length = %d, want 8 (got %q)", len(got), got)
+	}
+}
+
+func TestShouldTrackRequestID(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/v1/messages", true},
+		{"/v0/management/audit-logs", true},
+		{"/management/health", true},
+		{"/healthz", false},
+		{"/api/other", false},
+	}
+	for _, tc := range cases {
+		if got := shouldTrackRequestID(tc.path); got != tc.want {
+			t.Errorf("shouldTrackRequestID(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
