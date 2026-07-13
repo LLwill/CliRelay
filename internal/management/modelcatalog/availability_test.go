@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -330,5 +331,137 @@ func TestFilterModelsByScopesAlwaysScopesToTenantWithoutChannelFilters(t *testin
 	filtered := svc.filterModelsByScopes(models, "", "")
 	if len(filtered) != 1 || filtered[0]["id"] != tenantModelID {
 		t.Fatalf("filtered = %#v, want only tenant model", filtered)
+	}
+}
+
+func TestConfiguredAvailabilityReplacesStaticCodexWithDiscovery(t *testing.T) {
+	const (
+		staticModelID    = "gpt-5.1-static-only"
+		liveModelID      = "gpt-5.6-sol"
+		bothModelID      = "gpt-5.4" // on static registry AND discovery — must remain
+		codexClientID    = "plaza-discovery-codex"
+		openCodeClientID = "plaza-discovery-opencode"
+		openCodeModelID  = "opencode-keep-model"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(codexClientID)
+	modelRegistry.UnregisterClient(openCodeClientID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(openCodeClientID)
+	})
+
+	// Static codex catalog rows (what RegisterClient does at startup).
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: staticModelID, Object: "model", OwnedBy: "openai"},
+		{ID: bothModelID, Object: "model", OwnedBy: "openai"},
+	})
+	// Non-codex provider must not be stripped.
+	modelRegistry.RegisterClient(openCodeClientID, "opencode-go", []*registry.ModelInfo{
+		{ID: openCodeModelID, Object: "model", OwnedBy: "opencode"},
+	})
+
+	// Seed live discovery with modern models (not registered into runtime registry).
+	managementauthfiles.StoreDiscoveryCacheForTest("", "codex", []*registry.ModelInfo{
+		{ID: liveModelID, Object: "model", OwnedBy: "openai", DisplayName: "GPT-5.6 Sol"},
+		{ID: bothModelID, Object: "model", OwnedBy: "openai", DisplayName: "GPT 5.4"},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: codexClientID, Provider: "codex", Label: "Codex Pro", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register codex: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: openCodeClientID, Provider: "opencode-go", Label: "OpenCode", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register opencode: %v", err)
+	}
+
+	result := New(&config.Config{}, manager).ConfiguredAvailability("", "")
+	data, ok := result["data"].([]map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v", result["data"])
+	}
+	ids := make(map[string]struct{}, len(data))
+	var liveSources []map[string]any
+	for _, item := range data {
+		id, _ := item["id"].(string)
+		ids[id] = struct{}{}
+		if id == liveModelID {
+			liveSources, _ = item["sources"].([]map[string]any)
+		}
+	}
+
+	if _, ok := ids[liveModelID]; !ok {
+		t.Fatalf("missing live discovery model %q; ids=%v", liveModelID, ids)
+	}
+	if _, ok := ids[bothModelID]; !ok {
+		t.Fatalf("missing overlap model %q; ids=%v", bothModelID, ids)
+	}
+	if _, ok := ids[openCodeModelID]; !ok {
+		t.Fatalf("opencode model %q was stripped; ids=%v", openCodeModelID, ids)
+	}
+	if _, ok := ids[staticModelID]; ok {
+		t.Fatalf("static-only codex model %q should be replaced by discovery; ids=%v", staticModelID, ids)
+	}
+	if len(liveSources) == 0 {
+		t.Fatalf("live discovery model should have synthesized sources")
+	}
+}
+
+func TestDropStaticDiscoveryProviderModelsDropsMappedOwnerLibrary(t *testing.T) {
+	const (
+		staleLibraryID = "gpt-5-stale-library"
+		liveModelID    = "gpt-5.6-sol"
+		codexClientID  = "mapped-owner-drop-codex"
+	)
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(codexClientID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(codexClientID) })
+
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: staleLibraryID, Object: "model", OwnedBy: "openai"},
+	})
+	managementauthfiles.StoreDiscoveryCacheForTest("", "codex", []*registry.ModelInfo{
+		{ID: liveModelID, Object: "model", OwnedBy: "openai"},
+	})
+
+	models := []map[string]any{
+		{"id": staleLibraryID, "object": "model", "owned_by": "openai"},
+		{"id": liveModelID, "object": "model", "owned_by": "openai"},
+		{"id": "unrelated-model", "object": "model", "owned_by": "deepseek"},
+	}
+	got := dropStaticDiscoveryProviderModels(
+		models,
+		modelRegistry,
+		map[string][]*registry.ModelInfo{
+			"codex": {{ID: liveModelID, Object: "model", OwnedBy: "openai"}},
+		},
+		map[string]*coreauth.Auth{
+			codexClientID: {ID: codexClientID, Provider: "codex", Status: coreauth.StatusActive},
+		},
+		map[string]string{"codex": "openai"},
+	)
+	ids := make(map[string]struct{}, len(got))
+	for _, m := range got {
+		ids[m["id"].(string)] = struct{}{}
+	}
+	if _, ok := ids[staleLibraryID]; ok {
+		t.Fatalf("stale mapped-owner library row should be dropped; got=%v", ids)
+	}
+	if _, ok := ids[liveModelID]; !ok {
+		t.Fatalf("live model should remain; got=%v", ids)
+	}
+	if _, ok := ids["unrelated-model"]; !ok {
+		t.Fatalf("unrelated owner model should remain; got=%v", ids)
 	}
 }

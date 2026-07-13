@@ -1,7 +1,9 @@
 package modelcatalog
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
@@ -15,21 +17,40 @@ import (
 // Availability contract:
 // - Owner: model availability query boundary.
 // - Responsibility: turn registry state plus stored capabilities into management-facing availability DTOs.
+//
+// Claude/Codex live discovery is intentionally NOT RegisterClient-written into
+// the runtime registry (subset risk, #673/#674). Management surfaces (plaza,
+// catalog) still need the same live list as the auth-file models panel, so we
+// merge the provider discovery cache here on every read (auto-warm on miss).
 func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw string) map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
-	allModels := s.effectiveModels(managementVisibleModels(modelRegistry), allowedChannelsRaw, allowedGroupsRaw)
 	authByID := s.authByID()
+	discoveryByProvider := s.sharedDiscoveryByProvider(false)
+	// Strip static-only claude/codex registry rows first, then scope-filter.
+	// Live discovery models are appended AFTER CanServe filtering because they
+	// are intentionally not RegisterClient-written into the runtime registry.
+	ownerMappings := s.authGroupOwnerMappingMap()
+	baseModels := dropStaticDiscoveryProviderModels(
+		managementVisibleModels(modelRegistry),
+		modelRegistry,
+		discoveryByProvider,
+		authByID,
+		ownerMappings,
+	)
+	allModels := s.effectiveModels(baseModels, allowedChannelsRaw, allowedGroupsRaw)
 	usesMappedOwners := false
-	var ownerMappings map[string]string
 	var ownerKeys map[string]bool
 	if shouldUseDefaultMappedOwnerScope(allowedChannelsRaw, allowedGroupsRaw) {
 		if rows, keys, configuredModelKeys, ok := s.defaultMappedOwnerRows(); ok {
 			usesMappedOwners = true
 			ownerKeys = keys
-			ownerMappings = s.authGroupOwnerMappingMap()
 			allModels = withDefaultMappedOwnerRows(modelRegistry, allModels, rows, ownerKeys, configuredModelKeys, authByID, ownerMappings)
 		}
 	}
+	// Mapped-owner config rows can re-introduce the full openai/anthropic library;
+	// drop stale rows again, then append the live discovery list.
+	allModels = dropStaticDiscoveryProviderModels(allModels, modelRegistry, discoveryByProvider, authByID, ownerMappings)
+	allModels = appendSharedDiscoveryModels(allModels, discoveryByProvider)
 
 	allConfigRows := modelconfigsettings.ListAllConfigsForTenant(s.tenantID)
 	configByID := make(map[string]usage.ModelConfigRow, len(allConfigRows))
@@ -49,11 +70,19 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 			"object": "model",
 			"source": "registry",
 		}
+		if src, _ := model["source"].(string); strings.TrimSpace(src) != "" {
+			entry["source"] = src
+		}
 		if ownedBy, exists := model["owned_by"]; exists {
 			entry["owned_by"] = ownedBy
 		}
 		if sources := s.modelSourceEntries(modelRegistry, id, authByID, ownerMappings, ownerKeys); len(sources) > 0 {
 			entry["sources"] = sources
+		} else if discoveryProvider, _ := model["discovery_provider"].(string); strings.TrimSpace(discoveryProvider) != "" {
+			// Discovery-only rows have no registry sources; synthesize from active auths.
+			if sources := s.discoverySourceEntries(discoveryProvider, id, authByID); len(sources) > 0 {
+				entry["sources"] = sources
+			}
 		}
 		if row, ok := configByID[strings.ToLower(id)]; ok {
 			attachModelConfigCapabilities(entry, row)
@@ -95,7 +124,19 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 
 func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string) map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
-	allModels := s.effectiveModels(managementVisibleModels(modelRegistry), allowedChannelsRaw, allowedGroupsRaw)
+	authByID := s.authByID()
+	discoveryByProvider := s.sharedDiscoveryByProvider(false)
+	ownerMappings := s.authGroupOwnerMappingMap()
+	baseModels := dropStaticDiscoveryProviderModels(
+		managementVisibleModels(modelRegistry),
+		modelRegistry,
+		discoveryByProvider,
+		authByID,
+		ownerMappings,
+	)
+	allModels := s.effectiveModels(baseModels, allowedChannelsRaw, allowedGroupsRaw)
+	allModels = dropStaticDiscoveryProviderModels(allModels, modelRegistry, discoveryByProvider, authByID, ownerMappings)
+	allModels = appendSharedDiscoveryModels(allModels, discoveryByProvider)
 
 	pricingMap := usage.GetAllModelPricingForTenant(s.tenantID)
 	filteredModels := make([]map[string]any, len(allModels))
@@ -156,6 +197,273 @@ func managementVisibleModels(modelRegistry *registry.ModelRegistry) []map[string
 		for _, info := range modelRegistry.GetAvailableModelsByProvider(provider) {
 			add(registryModelInfoAsOpenAIModel(info))
 		}
+	}
+	return out
+}
+
+// sharedDiscoveryByProvider auto-warms (or reads) the claude/codex provider
+// discovery cache for the current tenant. force is reserved for future refresh
+// query support; management list endpoints currently always use force=false.
+func (s *Service) sharedDiscoveryByProvider(force bool) map[string][]*registry.ModelInfo {
+	if s == nil || s.authManager == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return managementauthfiles.EnsureSharedDiscoveryForTenant(ctx, s.authManager, s.cfg, s.tenantID, force)
+}
+
+func liveDiscoveryProviders(discoveryByProvider map[string][]*registry.ModelInfo) map[string]struct{} {
+	out := make(map[string]struct{}, len(discoveryByProvider))
+	for provider, list := range discoveryByProvider {
+		if len(list) == 0 {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(provider))] = struct{}{}
+	}
+	return out
+}
+
+func discoveryModelIDSet(discoveryByProvider map[string][]*registry.ModelInfo) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, list := range discoveryByProvider {
+		for _, info := range list {
+			if info == nil {
+				continue
+			}
+			if id := strings.ToLower(strings.TrimSpace(info.ID)); id != "" {
+				out[id] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// dropStaticDiscoveryProviderModels removes models that would otherwise keep the
+// stale static Claude/Codex catalog visible after live discovery is warm:
+//  1. Registry rows only served by live-discovery providers and not on the live list.
+//  2. Owner-mapped library rows (openai/anthropic catalog) for owners that map
+//     from those providers, when the model is not on the live list and has no
+//     non-discovery runtime source (e.g. opencode-go).
+//
+// Models still served by other providers are kept.
+func dropStaticDiscoveryProviderModels(
+	models []map[string]any,
+	modelRegistry *registry.ModelRegistry,
+	discoveryByProvider map[string][]*registry.ModelInfo,
+	authByID map[string]*coreauth.Auth,
+	ownerMappings map[string]string,
+) []map[string]any {
+	liveProviders := liveDiscoveryProviders(discoveryByProvider)
+	if len(liveProviders) == 0 {
+		return models
+	}
+	discoveryIDs := discoveryModelIDSet(discoveryByProvider)
+	discoveryOwners := ownersMappedFromProviders(ownerMappings, liveProviders)
+	out := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" {
+			continue
+		}
+		if _, onLive := discoveryIDs[key]; onLive {
+			out = append(out, model)
+			continue
+		}
+		if modelOnlyServedByDiscoveryProviders(modelRegistry, id, authByID, liveProviders) {
+			continue
+		}
+		if modelIsStaleMappedOwnerLibraryRow(model, modelRegistry, id, authByID, liveProviders, discoveryOwners) {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
+// ownersMappedFromProviders returns owner keys that map from any auth-group in liveProviders.
+func ownersMappedFromProviders(ownerMappings map[string]string, liveProviders map[string]struct{}) map[string]bool {
+	if len(ownerMappings) == 0 || len(liveProviders) == 0 {
+		return nil
+	}
+	out := make(map[string]bool)
+	for authGroup, owner := range ownerMappings {
+		if _, ok := liveProviders[normalizeAuthGroupKey(authGroup)]; !ok {
+			continue
+		}
+		if key := normalizeModelOwnerKey(owner); key != "" {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// modelIsStaleMappedOwnerLibraryRow drops owner-mapped catalog rows that only
+// exist because of a codex→openai / claude→anthropic mapping, once live
+// discovery has replaced that provider's callable set.
+func modelIsStaleMappedOwnerLibraryRow(
+	model map[string]any,
+	modelRegistry *registry.ModelRegistry,
+	modelID string,
+	authByID map[string]*coreauth.Auth,
+	liveProviders map[string]struct{},
+	discoveryOwners map[string]bool,
+) bool {
+	if len(discoveryOwners) == 0 {
+		return false
+	}
+	ownedBy, _ := model["owned_by"].(string)
+	ownerKey := normalizeModelOwnerKey(ownedBy)
+	if ownerKey == "" || !discoveryOwners[ownerKey] {
+		return false
+	}
+	// If any non-discovery provider still serves this model, keep it.
+	if modelRegistry != nil {
+		sources := modelRegistry.GetModelClientSources(modelID)
+		for _, source := range sources {
+			provider := strings.ToLower(strings.TrimSpace(source.Provider))
+			if auth := authByID[strings.TrimSpace(source.ClientID)]; auth != nil && strings.TrimSpace(auth.Provider) != "" {
+				provider = strings.ToLower(strings.TrimSpace(auth.Provider))
+			}
+			if _, isLiveProvider := liveProviders[provider]; !isLiveProvider {
+				return false
+			}
+		}
+		// Has only discovery-provider sources (or none): stale library row for this owner.
+		if len(sources) > 0 {
+			return true
+		}
+	}
+	// No registry sources: pure mapped-owner library row for a discovery-backed owner.
+	return true
+}
+
+// appendSharedDiscoveryModels adds live discovery models that are not already
+// present. Called AFTER tenant/channel scope filtering because discovery models
+// are not RegisterClient-written into the runtime registry (so CanServe would
+// drop them). Tenant ownership is already enforced by EnsureSharedDiscoveryForTenant
+// which only warms providers with active auths in this tenant.
+func appendSharedDiscoveryModels(
+	models []map[string]any,
+	discoveryByProvider map[string][]*registry.ModelInfo,
+) []map[string]any {
+	if len(discoveryByProvider) == 0 {
+		return models
+	}
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		if key := strings.ToLower(strings.TrimSpace(id)); key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	out := models
+	for provider, list := range discoveryByProvider {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		for _, info := range list {
+			entry := registryModelInfoAsOpenAIModel(info)
+			if entry == nil {
+				continue
+			}
+			id, _ := entry["id"].(string)
+			key := strings.ToLower(strings.TrimSpace(id))
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			entry["source"] = "upstream-discovery"
+			entry["discovery_provider"] = provider
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// modelOnlyServedByDiscoveryProviders reports whether every registry source for
+// modelID belongs to a provider that has an active live discovery overlay.
+// If so, the static catalog row should be replaced by the discovery list.
+func modelOnlyServedByDiscoveryProviders(
+	modelRegistry *registry.ModelRegistry,
+	modelID string,
+	authByID map[string]*coreauth.Auth,
+	liveProviders map[string]struct{},
+) bool {
+	if modelRegistry == nil || len(liveProviders) == 0 {
+		return false
+	}
+	sources := modelRegistry.GetModelClientSources(modelID)
+	if len(sources) == 0 {
+		return false
+	}
+	for _, source := range sources {
+		provider := strings.ToLower(strings.TrimSpace(source.Provider))
+		if auth := authByID[strings.TrimSpace(source.ClientID)]; auth != nil && strings.TrimSpace(auth.Provider) != "" {
+			provider = strings.ToLower(strings.TrimSpace(auth.Provider))
+		}
+		if _, ok := liveProviders[provider]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// discoverySourceEntries builds synthetic source labels for discovery-only
+// models so plaza cards can still show which codex/claude accounts serve them.
+func (s *Service) discoverySourceEntries(
+	provider string,
+	modelID string,
+	authByID map[string]*coreauth.Auth,
+) []map[string]any {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelID = strings.TrimSpace(modelID)
+	if provider == "" || modelID == "" {
+		return nil
+	}
+	out := make([]map[string]any, 0)
+	seen := make(map[string]struct{})
+	for _, auth := range authByID {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), provider) {
+			continue
+		}
+		clientID := strings.TrimSpace(auth.ID)
+		channel := strings.TrimSpace(auth.ChannelName())
+		label := provider
+		if channel != "" {
+			label = channel
+			if provider != "" && !strings.EqualFold(provider, channel) {
+				label = provider + " · " + channel
+			}
+		}
+		if label == "" {
+			label = clientID
+		}
+		key := clientID + "\x00" + label
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		entry := map[string]any{
+			"label":     label,
+			"provider":  provider,
+			"client_id": clientID,
+			"model_id":  modelID,
+		}
+		if channel != "" {
+			entry["channel"] = channel
+		}
+		if auth.Attributes != nil {
+			if src := strings.TrimSpace(auth.Attributes["source"]); src != "" {
+				entry["source"] = src
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }

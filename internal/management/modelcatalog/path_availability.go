@@ -14,6 +14,9 @@ import (
 // Path availability contract:
 // - Owner: model path capability boundary.
 // - Responsibility: expose routing/path-specific model availability derived from registry metadata.
+//
+// Claude/Codex live discovery is merged into the root OpenAI path so the model
+// catalog "path-only" enrichment matches the auth-file models panel.
 func (s *Service) PathAvailability() map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
 	items := make(map[string]*modelPathAvailabilityResponse)
@@ -21,7 +24,18 @@ func (s *Service) PathAvailability() map[string]any {
 	routingConfig := tenantRoutingConfig(s.tenantID, s.cfg)
 	rootOpenAICapabilities := openAIV1Capabilities("/")
 	rootGeminiCapabilities := geminiV1BetaCapabilities("/")
-	appendModelPaths(items, s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("openai"), routingConfig), "/", rootOpenAICapabilities)
+	authByID := s.authByID()
+	discoveryByProvider := s.sharedDiscoveryByProvider(false)
+	openaiModels := dropStaticDiscoveryProviderModels(
+		modelRegistry.GetAvailableModels("openai"),
+		modelRegistry,
+		discoveryByProvider,
+		authByID,
+		s.authGroupOwnerMappingMap(),
+	)
+	openaiModels = s.modelRootRouteScopedModels(openaiModels, routingConfig)
+	openaiModels = appendSharedDiscoveryModels(openaiModels, discoveryByProvider)
+	appendModelPaths(items, openaiModels, "/", rootOpenAICapabilities)
 	appendModelPaths(items, s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), routingConfig), "/", rootGeminiCapabilities)
 
 	routes := []modelPathRouteResponse{

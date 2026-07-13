@@ -52,6 +52,11 @@ func ResetDiscoveryCacheForTest() {
 	discoveryCacheMu.Unlock()
 }
 
+// StoreDiscoveryCacheForTest seeds the provider discovery cache (tests only).
+func StoreDiscoveryCacheForTest(tenantID, provider string, models []*registry.ModelInfo) {
+	storeDiscoveryCache(tenantID, provider, models)
+}
+
 func discoveryCacheKey(tenantID, provider string) string {
 	return NormalizeTenantID(tenantID) + "|" + strings.ToLower(strings.TrimSpace(provider))
 }
@@ -63,6 +68,11 @@ func supportsSharedDiscovery(provider string) bool {
 	default:
 		return false
 	}
+}
+
+// SupportsSharedDiscovery reports whether provider uses the shared live-discovery cache.
+func SupportsSharedDiscovery(provider string) bool {
+	return supportsSharedDiscovery(provider)
 }
 
 func loadDiscoveryCache(tenantID, provider string) []*registry.ModelInfo {
@@ -94,6 +104,89 @@ func storeDiscoveryCache(tenantID, provider string, models []*registry.ModelInfo
 		fetchedAt: time.Now(),
 	}
 	discoveryCacheMu.Unlock()
+}
+
+// EnsureProviderDiscovery returns the shared live model list for claude/codex.
+// Cache hit is preferred; on miss it warms once from the first active auth of
+// that provider in the tenant (same single-flight path as the auth-file panel).
+// force re-fetches upstream even when the cache is warm.
+func EnsureProviderDiscovery(
+	ctx context.Context,
+	manager *coreauth.Manager,
+	cfg *config.Config,
+	tenantID, provider string,
+	force bool,
+) []*registry.ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !supportsSharedDiscovery(provider) {
+		return nil
+	}
+	if !force {
+		if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
+			return cached
+		}
+	}
+	auth := firstActiveAuthForProvider(manager, tenantID, provider)
+	if auth == nil {
+		return loadDiscoveryCache(tenantID, provider)
+	}
+	live, ok := warmSharedDiscovery(ctx, auth, cfg, tenantID, provider, force)
+	if ok && len(live) > 0 {
+		return live
+	}
+	return loadDiscoveryCache(tenantID, provider)
+}
+
+// EnsureSharedDiscoveryForTenant warms/returns discovery lists for every
+// shared-discovery provider that has at least one active auth in the tenant.
+// Used by model plaza / catalog so they show the same live list as the
+// auth-file models panel (not the static registry catalog).
+func EnsureSharedDiscoveryForTenant(
+	ctx context.Context,
+	manager *coreauth.Manager,
+	cfg *config.Config,
+	tenantID string,
+	force bool,
+) map[string][]*registry.ModelInfo {
+	out := make(map[string][]*registry.ModelInfo)
+	if manager == nil {
+		return out
+	}
+	seen := make(map[string]struct{})
+	for _, auth := range manager.ListForTenant(NormalizeTenantID(tenantID)) {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if !supportsSharedDiscovery(provider) {
+			continue
+		}
+		if _, ok := seen[provider]; ok {
+			continue
+		}
+		seen[provider] = struct{}{}
+		models := EnsureProviderDiscovery(ctx, manager, cfg, tenantID, provider, force)
+		if len(models) > 0 {
+			out[provider] = models
+		}
+	}
+	return out
+}
+
+func firstActiveAuthForProvider(manager *coreauth.Manager, tenantID, provider string) *coreauth.Auth {
+	if manager == nil {
+		return nil
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	for _, auth := range manager.ListForTenant(NormalizeTenantID(tenantID)) {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.Provider), provider) {
+			return auth
+		}
+	}
+	return nil
 }
 
 func ModelLookupAuthID(manager *coreauth.Manager, name string) string {
