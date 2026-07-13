@@ -522,7 +522,13 @@ func QueryAPIKeyDistributionForTenant(tenantID string, days int) ([]APIKeyDistri
 	params := LogQueryParams{TenantID: tenantID, Days: days}
 	where, args := buildWhereClause(params)
 	currentByID := currentAPIKeyRowsByIDForTenant(tenantID)
+	currentByKey := currentAPIKeyRowsByKeyForTenant(tenantID)
 
+	// Group by id-or-raw so logs that predate api_key_id still contribute.
+	// Post-scan we resolve raw secrets via the live key table and merge
+	// id-group + raw-group of the same key into one distribution point.
+	// Without that merge, monitor "API Key usage" shows duplicate names
+	// (e.g. 袁蔚 16.1k + 袁蔚 177) for a single key.
 	q := `SELECT
 	             CASE
 	               WHEN trim(coalesce(api_key_id, '')) <> '' THEN api_key_id
@@ -543,7 +549,8 @@ func QueryAPIKeyDistributionForTenant(tenantID string, days int) ([]APIKeyDistri
 	}
 	defer rows.Close()
 
-	var result []APIKeyDistributionPoint
+	merged := make(map[string]*APIKeyDistributionPoint)
+	order := make([]string, 0)
 	for rows.Next() {
 		var logicalSelector string
 		var logicalID sql.NullString
@@ -555,7 +562,17 @@ func QueryAPIKeyDistributionForTenant(tenantID string, days int) ([]APIKeyDistri
 		}
 		p.APIKey = strings.TrimSpace(snapshotKey)
 		p.Name = strings.TrimSpace(snapshotName)
+
+		// Prefer stable id identity; fall back to exact raw-key match for
+		// legacy rows that never received api_key_id backfill.
 		if row, ok := currentByID[trimNullString(logicalID)]; ok {
+			if trimmed := strings.TrimSpace(row.Key); trimmed != "" {
+				p.APIKey = trimmed
+			}
+			if trimmed := strings.TrimSpace(row.Name); trimmed != "" {
+				p.Name = trimmed
+			}
+		} else if row, ok := currentByKey[p.APIKey]; ok {
 			if trimmed := strings.TrimSpace(row.Key); trimmed != "" {
 				p.APIKey = trimmed
 			}
@@ -566,9 +583,34 @@ func QueryAPIKeyDistributionForTenant(tenantID string, days int) ([]APIKeyDistri
 		if p.APIKey == "" {
 			continue
 		}
-		result = append(result, p)
+
+		if existing, ok := merged[p.APIKey]; ok {
+			existing.Requests += p.Requests
+			existing.Tokens += p.Tokens
+			if existing.Name == "" && p.Name != "" {
+				existing.Name = p.Name
+			}
+			continue
+		}
+		point := p
+		merged[p.APIKey] = &point
+		order = append(order, p.APIKey)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]APIKeyDistributionPoint, 0, len(order))
+	for _, key := range order {
+		result = append(result, *merged[key])
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Requests != result[j].Requests {
+			return result[i].Requests > result[j].Requests
+		}
+		return result[i].APIKey < result[j].APIKey
+	})
+	return result, nil
 }
 
 // HourlyTokenPoint holds token usage per hour for the last N hours.

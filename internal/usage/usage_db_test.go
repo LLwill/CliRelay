@@ -1856,6 +1856,81 @@ func TestQueryFiltersForLogsLinksFilterFacets(t *testing.T) {
 	}
 }
 
+func TestQueryAPIKeyDistributionMergesRawAndIDGroupsForSameKey(t *testing.T) {
+	// Production shape: some request_logs carry api_key_id, older rows for the
+	// same secret only have api_key. Distribution must merge into one point so
+	// the monitor donut does not list the same name twice.
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	const (
+		stableID = "16332427-2510-48e4-9c42-dcc148008ea0"
+		rawKey   = "sk-bai8v0z1hoytg4wopcyxz9t9t0yvx0zb"
+		name     = "袁蔚"
+	)
+	if err := UpsertAPIKey(APIKeyRow{ID: stableID, Key: rawKey, Name: name}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentity(rawKey, stableID, name, "gpt-test", "source", "channel", "auth-1", false, now, 10, 10, TokenStats{TotalTokens: 100}, "", "", "")
+	InsertLogWithDetailsIdentity(rawKey, stableID, name, "gpt-test", "source", "channel", "auth-1", false, now.Add(time.Second), 10, 10, TokenStats{TotalTokens: 50}, "", "", "")
+
+	db := getDB()
+	// Legacy rows: same raw key, empty api_key_id (and often empty name snapshot).
+	for i := 0; i < 3; i++ {
+		ts := now.Add(time.Duration(i+2) * time.Second).Format(time.RFC3339Nano)
+		if _, err := db.Exec(
+			`INSERT INTO request_logs
+				(timestamp, api_key, api_key_id, api_key_name, model, source, channel_name, auth_index,
+				 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, rawKey, "", "", "gpt-test", "source", "channel", "auth-1",
+			0, 10, 1, 1, 1, 0, 0, 10, 0,
+		); err != nil {
+			t.Fatalf("insert legacy request_log %d: %v", i, err)
+		}
+	}
+
+	// Unrelated key must remain a separate slice entry.
+	if err := UpsertAPIKey(APIKeyRow{ID: "other-id", Key: "sk-other", Name: "Other"}); err != nil {
+		t.Fatalf("UpsertAPIKey(other): %v", err)
+	}
+	InsertLogWithDetailsIdentity("sk-other", "other-id", "Other", "gpt-test", "source", "channel", "auth-2", false, now, 1, 1, TokenStats{TotalTokens: 5}, "", "", "")
+
+	dist, err := QueryAPIKeyDistribution(7)
+	if err != nil {
+		t.Fatalf("QueryAPIKeyDistribution() error = %v", err)
+	}
+	if len(dist) != 2 {
+		t.Fatalf("distribution len = %d, want 2 (merged primary + other): %#v", len(dist), dist)
+	}
+
+	var primary *APIKeyDistributionPoint
+	for i := range dist {
+		if dist[i].APIKey == rawKey {
+			primary = &dist[i]
+			break
+		}
+	}
+	if primary == nil {
+		t.Fatalf("missing merged point for %q in %#v", rawKey, dist)
+	}
+	if primary.Name != name {
+		t.Fatalf("merged name = %q, want %q", primary.Name, name)
+	}
+	// 2 id-backed + 3 raw-only rows
+	if primary.Requests != 5 {
+		t.Fatalf("merged requests = %d, want 5", primary.Requests)
+	}
+	// 100 + 50 + 3*10
+	if primary.Tokens != 180 {
+		t.Fatalf("merged tokens = %d, want 180", primary.Tokens)
+	}
+	if dist[0].APIKey != rawKey {
+		t.Fatalf("expected primary key first by request count, got %#v", dist)
+	}
+}
+
 func TestRequestStatisticsPersistsAPIKeyIdentitySnapshotAcrossRename(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{})
 
