@@ -128,9 +128,16 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	case "antigravity":
 		models = s.fetchAntigravityRegistryModels(ctx, a, excluded)
 	case "claude":
-		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("claude")
+		// Prefer live Anthropic /v1/models (OAuth or API key) when credentials work;
+		// fall back to static catalog + optional config models, matching xAI/antigravity.
+		if live := s.fetchClaudeRegistryModels(ctx, a, nil); len(live) > 0 {
+			models = live
+		} else {
+			models = sdkmodelcatalog.StaticModelDefinitionsByChannel("claude")
+		}
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
 			if len(entry.Models) > 0 {
+				// Explicit config models still win for API-key channels that pin a list.
 				models = buildClaudeConfigModels(entry, lookupStaticModelThinking)
 			}
 			if authKind == "apikey" {
@@ -178,7 +185,12 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("codex")
+		// Prefer live Codex models manifest / OpenAI-compatible /models when credentials work.
+		if live := s.fetchCodexRegistryModels(ctx, a, nil); len(live) > 0 {
+			models = live
+		} else {
+			models = sdkmodelcatalog.StaticModelDefinitionsByChannel("codex")
+		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry, lookupStaticModelThinking)

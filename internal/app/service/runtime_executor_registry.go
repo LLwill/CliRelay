@@ -441,6 +441,14 @@ func FetchXAIModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config
 	return executor.FetchXAIModels(ctx, auth, cfg)
 }
 
+func FetchClaudeModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
+	return executor.FetchClaudeModels(ctx, auth, cfg)
+}
+
+func FetchCodexModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
+	return executor.FetchCodexModels(ctx, auth, cfg)
+}
+
 func RebindTenantExecutors(base *config.Config, coreManager *coreauth.Manager, tenantID string, gateway WebsocketGateway) {
 	if base == nil || coreManager == nil {
 		return
