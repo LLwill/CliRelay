@@ -44,4 +44,6 @@ func registerManagementIdentityRoutes(group *gin.RouterGroup, h *managementhandl
 	group.PUT("/roles/:id/users", h.PutRoleUsers)
 	group.DELETE("/roles/:id", h.DeleteRole)
 	group.GET("/audit-logs", h.GetAuditLogs)
+	group.GET("/audit-logs/:id", h.GetAuditLog)
+	group.DELETE("/audit-logs/:id", h.DeleteAuditLog)
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -97,6 +98,13 @@ func (h *Handler) recordManagementAudit(c *gin.Context, principal identity.Princ
 	if result == "success" && !write && !sensitiveRead {
 		return
 	}
+	requestID := logging.GetGinRequestID(c)
+	if requestID == "" {
+		requestID = logging.GetRequestID(c.Request.Context())
+	}
+	routePath := strings.TrimPrefix(c.Request.URL.Path, "/v0/management")
+	handlerName := c.Request.Method + " " + routePath
+	permission := permissionForManagementRequest(c.Request.Method, c.Request.URL.Path)
 	service.RecordAudit(c.Request.Context(), identity.AuditEvent{
 		TenantID:       principal.EffectiveTenant.ID,
 		ActorKind:      principal.Kind,
@@ -106,6 +114,28 @@ func (h *Handler) recordManagementAudit(c *gin.Context, principal identity.Princ
 		ResourceType:   resourceType,
 		ResourceID:     resourceID,
 		Result:         result,
+		RequestID:      requestID,
+		Changes: map[string]any{
+			"http": map[string]any{
+				"method": c.Request.Method,
+				"path":   c.Request.URL.Path,
+				"status": c.Writer.Status(),
+			},
+			"permission": permission,
+			// call_chain reconstructs the management request path for audit detail UI.
+			"call_chain": []map[string]any{
+				{"step": 1, "layer": "http", "name": c.Request.Method + " " + c.Request.URL.Path, "detail": "client request"},
+				{"step": 2, "layer": "middleware", "name": "management.auth", "detail": "session + RBAC"},
+				{"step": 3, "layer": "handler", "name": handlerName, "package": "internal/api/handlers/management"},
+				{"step": 4, "layer": "service", "name": "identity/management service", "resource": resourceType, "resource_id": resourceID},
+			},
+			"project_method": map[string]any{
+				"package":  "internal/api/handlers/management",
+				"handler":  handlerName,
+				"resource": resourceType,
+				"route":    routePath,
+			},
+		},
 	})
 }
 
@@ -492,7 +522,8 @@ func isTenantGovernancePath(path string) bool {
 	return relative == "/tenants" || strings.HasPrefix(relative, "/tenants/") ||
 		relative == "/users" || strings.HasPrefix(relative, "/users/") ||
 		relative == "/roles" || strings.HasPrefix(relative, "/roles/") ||
-		relative == "/permissions" || relative == "/menus" || strings.HasPrefix(relative, "/menus/") || relative == "/audit-logs"
+		relative == "/permissions" || relative == "/menus" || strings.HasPrefix(relative, "/menus/") ||
+		relative == "/audit-logs" || strings.HasPrefix(relative, "/audit-logs/")
 }
 
 // deniesTenantResourceScope blocks process-global management routes when the
@@ -664,10 +695,43 @@ func (h *Handler) DeleteTenant(c *gin.Context) {
 func (h *Handler) GetAuditLogs(c *gin.Context) {
 	principal, _ := principalFromContext(c)
 	platform := principal.Has("platform.audit.read")
-	items, err := h.identity().ListAuditLogs(c.Request.Context(), principal.EffectiveTenant.ID, platform)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "50"))
+	result, err := h.identity().ListAuditLogs(c.Request.Context(), principal.EffectiveTenant.ID, platform, page, size)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) GetAuditLog(c *gin.Context) {
+	principal, _ := principalFromContext(c)
+	platform := principal.Has("platform.audit.read")
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	item, err := h.identity().GetAuditLog(c.Request.Context(), principal.EffectiveTenant.ID, platform, id)
+	if err != nil {
+		identityError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, item)
+}
+
+func (h *Handler) DeleteAuditLog(c *gin.Context) {
+	principal, _ := principalFromContext(c)
+	platform := principal.Has("platform.audit.read")
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := h.identity().DeleteAuditLog(c.Request.Context(), principal.EffectiveTenant.ID, platform, id); err != nil {
+		identityError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

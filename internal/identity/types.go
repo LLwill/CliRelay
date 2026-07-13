@@ -84,4 +84,6 @@ type AuditEvent struct {
 	ResourceID     string
 	Result         string
 	RequestID      string
+	// Changes stores structured call-chain / mutation metadata (JSON object).
+	Changes map[string]any
 }
