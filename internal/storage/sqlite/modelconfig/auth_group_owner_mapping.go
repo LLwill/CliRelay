@@ -11,7 +11,6 @@ type AuthGroupOwnerMappingRow struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-
 func NormalizeAuthGroupKey(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), "-"))
 }
@@ -72,4 +71,3 @@ func (s Store) DeleteAuthGroupOwnerMapping(authGroup string) error {
 	_, err := s.db.Exec("DELETE FROM auth_group_model_owner_mappings WHERE tenant_id = ? AND auth_group = ?", s.tenantID, authGroup)
 	return err
 }
-

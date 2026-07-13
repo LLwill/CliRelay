@@ -838,8 +838,6 @@ func scanModelConfigRow(scanner interface{ Scan(...any) error }) (ModelConfigRow
 	return row, true
 }
 
-
-
 func sqliteColumnExists(db *sql.DB, tableName, columnName string) bool {
 	rows, err := db.Query("PRAGMA table_info(" + tableName + ")")
 	if err != nil {

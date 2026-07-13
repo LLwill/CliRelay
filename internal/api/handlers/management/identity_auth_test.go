@@ -24,6 +24,26 @@ func TestPermissionForManagementRequest(t *testing.T) {
 		{http.MethodGet, "/v0/management/get-auth-status", "auth_files.oauth"},
 		{http.MethodPost, "/v0/management/proxy-pool/check", "proxies.test"},
 		{http.MethodPut, "/v0/management/config.yaml", "system.config.write"},
+		// Sensitive logs must not fall through to system.config.read.
+		{http.MethodGet, "/v0/management/request-error-logs", "system.logs.read"},
+		{http.MethodGet, "/v0/management/request-error-logs/err.log", "system.logs.read"},
+		{http.MethodGet, "/v0/management/request-log-by-id/abc", "system.logs.read"},
+		{http.MethodGet, "/v0/management/logs", "system.logs.read"},
+		// Usage writes must not use monitor.read.
+		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
+		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
+		{http.MethodGet, "/v0/management/usage", "monitor.read"},
+		{http.MethodGet, "/v0/management/usage/export", "monitor.read"},
+		// Config knobs that share prefixes with other resources.
+		{http.MethodGet, "/v0/management/usage-statistics-enabled", "system.config.read"},
+		{http.MethodPatch, "/v0/management/usage-statistics-enabled", "system.config.write"},
+		{http.MethodPut, "/v0/management/logs-max-total-size-mb", "system.config.write"},
+		{http.MethodGet, "/v0/management/request-log", "system.config.read"},
+		{http.MethodPut, "/v0/management/request-log", "system.config.write"},
+		{http.MethodGet, "/v0/management/ws-auth", "system.config.read"},
+		// Fail closed: unmapped routes get no permission.
+		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
+		{http.MethodPost, "/v0/management/totally-unknown-route", ""},
 		// Account fingerprint APIs are auth-file scoped; global preset PUT stays platform-only.
 		{http.MethodGet, "/v0/management/identity-fingerprint", "auth_files.read"},
 		{http.MethodGet, "/v0/management/identity-fingerprint/account", "auth_files.read"},

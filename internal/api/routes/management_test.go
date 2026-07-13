@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -76,6 +77,71 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 			t.Fatalf("required route %s was not registered", key)
 		}
 	}
+}
+
+// TestManagementRoutePermissionsComplete fails if any non-public management
+// route maps to an empty permission (fail-open gap) or if sensitive/write
+// routes regress to the wrong class of permission.
+func TestManagementRoutePermissionsComplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	RegisterManagement(engine, &managementhandlers.Handler{}, ManagementOptions{})
+
+	var missing []string
+	for _, route := range engine.Routes() {
+		if !strings.HasPrefix(route.Path, "/v0/management") {
+			continue
+		}
+		// Public endpoints use separate middleware and do not go through
+		// permissionForManagementRequest.
+		if strings.Contains(route.Path, "/public/") {
+			continue
+		}
+		samplePath := managementPermissionSamplePath(route.Path)
+		perm := managementhandlers.ManagementRequestPermission(route.Method, samplePath)
+		if perm == "" {
+			missing = append(missing, route.Method+" "+route.Path)
+		}
+		// Write methods must not land on pure-read monitor permission.
+		if route.Method != http.MethodGet && route.Method != http.MethodHead && perm == "monitor.read" {
+			t.Errorf("%s %s maps write method to monitor.read", route.Method, route.Path)
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		t.Fatalf("routes without explicit permission (fail closed expected non-empty):\n%s", strings.Join(missing, "\n"))
+	}
+
+	// Lock sensitive / write cases called out in the review findings.
+	locked := []struct {
+		method, path, want string
+	}{
+		{http.MethodGet, "/v0/management/request-error-logs", "system.logs.read"},
+		{http.MethodGet, "/v0/management/request-error-logs/err.log", "system.logs.read"},
+		{http.MethodGet, "/v0/management/request-log-by-id/req-1", "system.logs.read"},
+		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
+		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
+		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
+	}
+	for _, item := range locked {
+		if got := managementhandlers.ManagementRequestPermission(item.method, item.path); got != item.want {
+			t.Errorf("ManagementRequestPermission(%s,%s)=%q want %q", item.method, item.path, got, item.want)
+		}
+	}
+}
+
+func managementPermissionSamplePath(routePath string) string {
+	// permissionForManagementRequest uses prefix/suffix heuristics; substitute
+	// path params with stable sample segments.
+	path := routePath
+	path = strings.ReplaceAll(path, ":code", "system.config")
+	path = strings.ReplaceAll(path, ":id", "sample-id")
+	path = strings.ReplaceAll(path, ":name", "error.log")
+	path = strings.ReplaceAll(path, ":task_id", "task-1")
+	path = strings.ReplaceAll(path, ":channel", "openai")
+	path = strings.ReplaceAll(path, "*id", "wildcard-id")
+	return path
 }
 
 func sortedRouteKeys(routes map[string]gin.RouteInfo) []string {
