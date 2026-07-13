@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 )
 
 func TestPermissionForManagementRequest(t *testing.T) {
@@ -29,6 +30,8 @@ func TestPermissionForManagementRequest(t *testing.T) {
 		{http.MethodGet, "/v0/management/request-error-logs/err.log", "system.logs.read"},
 		{http.MethodGet, "/v0/management/request-log-by-id/abc", "system.logs.read"},
 		{http.MethodGet, "/v0/management/logs", "system.logs.read"},
+		// Clearing file logs requires an explicit delete permission.
+		{http.MethodDelete, "/v0/management/logs", "system.logs.delete"},
 		// Usage writes must not use monitor.read.
 		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
 		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
@@ -85,5 +88,39 @@ func TestServiceCredentialCannotAccessTenantGovernance(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("service credential reached tenant governance handler")
+	}
+}
+
+// TestLogsDeleteRequiresExplicitPermission mirrors authenticateSessionToken's
+// permission gate: read-only log viewers must not pass DELETE /logs.
+func TestLogsDeleteRequiresExplicitPermission(t *testing.T) {
+	readOnly := identity.Principal{
+		Permissions: map[string]bool{"system.logs.read": true},
+	}
+	deleter := identity.Principal{
+		Permissions: map[string]bool{
+			"system.logs.read":   true,
+			"system.logs.delete": true,
+		},
+	}
+
+	getPerm := permissionForManagementRequest(http.MethodGet, "/v0/management/logs")
+	deletePerm := permissionForManagementRequest(http.MethodDelete, "/v0/management/logs")
+	if getPerm != "system.logs.read" {
+		t.Fatalf("GET /logs permission = %q, want system.logs.read", getPerm)
+	}
+	if deletePerm != "system.logs.delete" {
+		t.Fatalf("DELETE /logs permission = %q, want system.logs.delete", deletePerm)
+	}
+
+	// Same condition as authenticateSessionToken after permission lookup.
+	if getPerm == "" || !readOnly.Has(getPerm) {
+		t.Fatal("read-only principal should pass GET /logs")
+	}
+	if deletePerm != "" && readOnly.Has(deletePerm) {
+		t.Fatal("read-only principal must not pass DELETE /logs")
+	}
+	if deletePerm == "" || !deleter.Has(deletePerm) {
+		t.Fatal("principal with system.logs.delete should pass DELETE /logs")
 	}
 }

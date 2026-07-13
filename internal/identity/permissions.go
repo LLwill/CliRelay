@@ -24,6 +24,8 @@ var PermissionCatalog = []PermissionSeed{
 	{Code: "platform.menus.update", Name: "Update menu configuration", Scope: "platform", Resource: "menus", Action: "update", Sensitive: true},
 	{Code: "system.status.read", Name: "Read system status", Scope: "platform", Resource: "system", Action: "read"},
 	{Code: "system.logs.read", Name: "Read system logs", Scope: "platform", Resource: "system_logs", Action: "read", Sensitive: true},
+	// Destroying rotated/active file logs is a separate capability from reading them.
+	{Code: "system.logs.delete", Name: "Delete system logs", Scope: "platform", Resource: "system_logs", Action: "delete", Sensitive: true},
 	{Code: "system.config.read", Name: "Read system configuration", Scope: "platform", Resource: "system_config", Action: "read", Sensitive: true},
 	{Code: "system.config.write", Name: "Write system configuration", Scope: "platform", Resource: "system_config", Action: "write", Sensitive: true},
 	{Code: "system.update.manage", Name: "Manage system updates", Scope: "platform", Resource: "system_update", Action: "manage", Sensitive: true},

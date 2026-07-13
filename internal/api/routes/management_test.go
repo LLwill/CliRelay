@@ -103,9 +103,9 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		if perm == "" {
 			missing = append(missing, route.Method+" "+route.Path)
 		}
-		// Write methods must not land on pure-read monitor permission.
-		if route.Method != http.MethodGet && route.Method != http.MethodHead && perm == "monitor.read" {
-			t.Errorf("%s %s maps write method to monitor.read", route.Method, route.Path)
+		// Non-read methods must never map to a *.read capability.
+		if route.Method != http.MethodGet && route.Method != http.MethodHead && strings.HasSuffix(perm, ".read") {
+			t.Errorf("%s %s maps write method to read permission %q", route.Method, route.Path, perm)
 		}
 	}
 	if len(missing) > 0 {
@@ -120,6 +120,8 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		{http.MethodGet, "/v0/management/request-error-logs", "system.logs.read"},
 		{http.MethodGet, "/v0/management/request-error-logs/err.log", "system.logs.read"},
 		{http.MethodGet, "/v0/management/request-log-by-id/req-1", "system.logs.read"},
+		{http.MethodGet, "/v0/management/logs", "system.logs.read"},
+		{http.MethodDelete, "/v0/management/logs", "system.logs.delete"},
 		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
 		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},

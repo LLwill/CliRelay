@@ -152,6 +152,22 @@ func TestGeneratedIdentifier(t *testing.T) {
 	}
 }
 
+func TestSystemLogsDeletePermissionCatalog(t *testing.T) {
+	var found *PermissionSeed
+	for i := range PermissionCatalog {
+		if PermissionCatalog[i].Code == "system.logs.delete" {
+			found = &PermissionCatalog[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("system.logs.delete missing from PermissionCatalog")
+	}
+	if found.Scope != "platform" || found.Resource != "system_logs" || found.Action != "delete" || !found.Sensitive {
+		t.Fatalf("system.logs.delete seed = %+v, want platform/system_logs/delete/sensitive", *found)
+	}
+}
+
 func TestMenuCodeForPermission(t *testing.T) {
 	menuCodes := make(map[string]bool, len(MenuCatalog))
 	for _, menu := range MenuCatalog {
@@ -160,6 +176,7 @@ func TestMenuCodeForPermission(t *testing.T) {
 	tests := map[string]string{
 		"tenant.users.update":   "governance.users",
 		"request_logs.delete":   "runtime.request-logs",
+		"system.logs.delete":    "runtime.logs",
 		"platform.menus.update": MenuManagementCode,
 		"proxies.test":          "models.proxies",
 	}

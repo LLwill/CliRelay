@@ -62,7 +62,11 @@ func permissionForManagementRequest(method, path string) string {
 	case strings.HasPrefix(relative, "/request-error-logs"), strings.HasPrefix(relative, "/request-log-by-id"):
 		return "system.logs.read"
 	// Exact /logs only: /logs-max-total-size-mb is a config knob below.
+	// DELETE clears rotated logs and truncates main.log — not a read capability.
 	case relative == "/logs" || strings.HasPrefix(relative, "/logs/"):
+		if method == http.MethodDelete {
+			return "system.logs.delete"
+		}
 		return "system.logs.read"
 	case strings.HasPrefix(relative, "/usage/logs"):
 		if method == http.MethodDelete {
