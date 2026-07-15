@@ -11,6 +11,7 @@ type OpenAICompatibilityPatch struct {
 	Disabled      *bool                               `json:"disabled"`
 	Prefix        *string                             `json:"prefix"`
 	BaseURL       *string                             `json:"base-url"`
+	UpstreamAPI   *string                             `json:"upstream-api"`
 	APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 	Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 	Headers       *map[string]string                  `json:"headers"`
@@ -83,6 +84,9 @@ func (s *Service) PatchOpenAICompatibility(index *int, name *string, patch OpenA
 			return nil
 		}
 		entry.BaseURL = trimmed
+	}
+	if patch.UpstreamAPI != nil {
+		entry.UpstreamAPI = strings.TrimSpace(*patch.UpstreamAPI)
 	}
 	if patch.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*patch.APIKeyEntries)...)
@@ -248,6 +252,7 @@ func NormalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 		return
 	}
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.UpstreamAPI = strings.TrimSpace(entry.UpstreamAPI)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	for i := range entry.APIKeyEntries {
 		entry.APIKeyEntries[i].APIKey = strings.TrimSpace(entry.APIKeyEntries[i].APIKey)

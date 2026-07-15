@@ -1,7 +1,7 @@
 # ── Frontend source ──────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM alpine:3.22.0 AS frontend-source
 
-ARG FRONTEND_REPOSITORY=https://github.com/kittors/codeProxy.git
+ARG FRONTEND_REPOSITORY=https://github.com/LLwill/codeProxy.git
 ARG FRONTEND_REF=main
 ARG FRONTEND_COMMIT=
 
@@ -27,7 +27,7 @@ FROM --platform=$BUILDPLATFORM oven/bun:1 AS frontend-builder
 WORKDIR /frontend
 COPY --from=frontend-source /src/frontend/ .
 ARG UI_VERSION=dev
-ARG FRONTEND_REPOSITORY=https://github.com/kittors/codeProxy.git
+ARG FRONTEND_REPOSITORY=https://github.com/LLwill/codeProxy.git
 ARG FRONTEND_REF=main
 ARG FRONTEND_COMMIT=none
 ARG BUILD_DATE=unknown

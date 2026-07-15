@@ -48,21 +48,31 @@ jobs:
             VERSION="${REF_NAME}-${BACKEND_SHORT}"
             UI_VERSION_REF="${FRONTEND_REF}"
           fi
-          # Prefer a matching frontend branch; fall back to main for fork/feature branches.
-          FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
+          # Prefer this fork's panel repo (includes upstream-api UI). Fall back to
+          # kittors/codeProxy only if the configured repository/ref is missing.
+          FRONTEND_REPOSITORY="${FRONTEND_REPOSITORY:-https://github.com/LLwill/codeProxy.git}"
+          FRONTEND_COMMIT="$(git ls-remote "${FRONTEND_REPOSITORY}" "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
           if [ -z "${FRONTEND_COMMIT}" ] && [ "${FRONTEND_REF}" != "main" ]; then
-            echo "Frontend ref ${FRONTEND_REF} not found; falling back to main"
+            echo "Frontend ref ${FRONTEND_REF} not found in ${FRONTEND_REPOSITORY}; falling back to main"
             FRONTEND_REF="main"
             UI_VERSION_REF="main"
-            FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/main" | awk '{print $1}')"
+            FRONTEND_COMMIT="$(git ls-remote "${FRONTEND_REPOSITORY}" "refs/heads/main" | awk '{print $1}')"
           fi
           if [ -z "${FRONTEND_COMMIT}" ]; then
-            echo "Unable to resolve frontend ref: ${FRONTEND_REF}" >&2
+            echo "Frontend missing in ${FRONTEND_REPOSITORY}; falling back to https://github.com/kittors/codeProxy.git"
+            FRONTEND_REPOSITORY="https://github.com/kittors/codeProxy.git"
+            FRONTEND_REF="main"
+            UI_VERSION_REF="main"
+            FRONTEND_COMMIT="$(git ls-remote "${FRONTEND_REPOSITORY}" "refs/heads/main" | awk '{print $1}')"
+          fi
+          if [ -z "${FRONTEND_COMMIT}" ]; then
+            echo "Unable to resolve frontend ref: ${FRONTEND_REF} from ${FRONTEND_REPOSITORY}" >&2
             exit 1
           fi
           FRONTEND_SHORT="${FRONTEND_COMMIT:0:7}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "UI_VERSION=panel-${UI_VERSION_REF}-${FRONTEND_SHORT}" >> "$GITHUB_ENV"
+          echo "FRONTEND_REPOSITORY=${FRONTEND_REPOSITORY}" >> "$GITHUB_ENV"
           echo "FRONTEND_REF=${FRONTEND_REF}" >> "$GITHUB_ENV"
           echo "FRONTEND_COMMIT=${FRONTEND_COMMIT}" >> "$GITHUB_ENV"
           echo "backend_short=${BACKEND_SHORT}" >> "$GITHUB_OUTPUT"
@@ -114,6 +124,7 @@ jobs:
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
             UI_VERSION=${{ env.UI_VERSION }}
+            FRONTEND_REPOSITORY=${{ env.FRONTEND_REPOSITORY }}
             FRONTEND_REF=${{ env.FRONTEND_REF }}
             FRONTEND_COMMIT=${{ env.FRONTEND_COMMIT }}
           cache-from: type=gha

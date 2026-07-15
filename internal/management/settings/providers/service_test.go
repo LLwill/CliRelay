@@ -73,17 +73,19 @@ func TestPatchOpenAICompatibilityUpdatesAndDeletes(t *testing.T) {
 	baseURL := " https://new.example "
 	models := []config.OpenAICompatibilityModel{{Name: " gpt-4.1 ", Alias: " smart "}}
 
+	upstreamAPI := " AUTO "
 	err := NewService(cfg, nil).PatchOpenAICompatibility(nil, &name, OpenAICompatibilityPatch{
-		Name:     &newName,
-		Disabled: &disabled,
-		BaseURL:  &baseURL,
-		Models:   &models,
+		Name:        &newName,
+		Disabled:    &disabled,
+		BaseURL:     &baseURL,
+		UpstreamAPI: &upstreamAPI,
+		Models:      &models,
 	})
 	if err != nil {
 		t.Fatalf("PatchOpenAICompatibility() error = %v, want nil", err)
 	}
-	if got := cfg.OpenAICompatibility[0]; got.Name != "renamed" || got.BaseURL != "https://new.example" || !got.Disabled {
-		t.Fatalf("patched entry = %#v, want trimmed updated entry", got)
+	if got := cfg.OpenAICompatibility[0]; got.Name != "renamed" || got.BaseURL != "https://new.example" || !got.Disabled || got.UpstreamAPI != "auto" {
+		t.Fatalf("patched entry = %#v, want trimmed updated entry with upstream-api auto", got)
 	}
 
 	index := 0
@@ -679,6 +681,29 @@ func TestModelAccessProviderGetHidesStaleModelsWhenAllAccessDisabled(t *testing.
 	}
 	if got := svc.OllamaCloudKeys()[0]; len(got.Models) != 0 || !reflect.DeepEqual(got.ExcludedModels, []string{"*"}) {
 		t.Fatalf("OllamaCloudKeys()[0] = %#v, want no stale models", got)
+	}
+}
+
+func TestPatchOpenAICompatibilityUpstreamAPI(t *testing.T) {
+	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:    "compat",
+		BaseURL: "https://old.example",
+	}}}
+	name := "compat"
+	upstream := "responses"
+	if err := NewService(cfg, nil).PatchOpenAICompatibility(nil, &name, OpenAICompatibilityPatch{UpstreamAPI: &upstream}); err != nil {
+		t.Fatalf("PatchOpenAICompatibility() error = %v", err)
+	}
+	if got := cfg.OpenAICompatibility[0].UpstreamAPI; got != "responses" {
+		t.Fatalf("UpstreamAPI = %q, want responses", got)
+	}
+
+	clear := " "
+	if err := NewService(cfg, nil).PatchOpenAICompatibility(nil, &name, OpenAICompatibilityPatch{UpstreamAPI: &clear}); err != nil {
+		t.Fatalf("PatchOpenAICompatibility(clear) error = %v", err)
+	}
+	if got := cfg.OpenAICompatibility[0].UpstreamAPI; got != "" {
+		t.Fatalf("UpstreamAPI after clear = %q, want empty", got)
 	}
 }
 
