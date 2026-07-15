@@ -65,7 +65,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	execCtx, body, _, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
+	execCtx, body, _, namespaceTools, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return resp, err
 	}
@@ -119,6 +119,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		payload := bytes.TrimSpace(line[len(dataTag):])
+		payload = restoreXAINamespaceToolCalls(payload, namespaceTools)
 		switch gjson.GetBytes(payload, "type").String() {
 		case "response.failed", "error":
 			streamErr = codexResponsesFailedStatusErr(payload)
@@ -136,6 +137,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		payload = mergeCodexResponsesCompletedOutput(payload, pendingOutputItems, pendingOutputKeys)
+		payload = restoreXAINamespaceToolCalls(payload, namespaceTools)
 		if detail, ok := parseCodexUsage(payload); ok {
 			reporter.publishWithContent(execCtx.Context, detail, string(req.Payload), string(data))
 		}
@@ -155,7 +157,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
-	execCtx, body, _, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
+	execCtx, body, _, namespaceTools, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +215,8 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			var terminalErr error
 			if bytes.HasPrefix(line, dataTag) {
 				payload := bytes.TrimSpace(line[len(dataTag):])
+				payload = restoreXAINamespaceToolCalls(payload, namespaceTools)
+				line = append(append([]byte{}, dataTag...), append([]byte(" "), payload...)...)
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.completed":
 					completed = true
@@ -254,7 +258,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	execCtx, body, _, err := e.prepareResponsesRequest(ctx, auth, req, opts, false)
+	execCtx, body, _, _, err := e.prepareResponsesRequest(ctx, auth, req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -330,7 +334,7 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	return auth, nil
 }
 
-func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*ExecutionContext, []byte, []byte, error) {
+func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*ExecutionContext, []byte, []byte, map[string]xaiNamespaceToolRef, error) {
 	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
 		TargetFormat:      sdktranslator.FromString("codex"),
 		TranslateAsStream: stream,
@@ -340,7 +344,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliprox
 	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, execCtx.SourceFormat.String(), e.Identifier(), e.Identifier())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	body = execCtx.ApplyPayloadConfig(body, originalTranslated)
 	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
@@ -354,7 +358,9 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliprox
 		sysContent := extractSystemMessagesAsInstructions(execCtx.Request.Payload)
 		body, _ = sjson.SetBytes(body, "instructions", sysContent)
 	}
-	return execCtx, body, originalTranslated, nil
+	var namespaceTools map[string]xaiNamespaceToolRef
+	body, namespaceTools = prepareXAIResponsesBody(body)
+	return execCtx, body, originalTranslated, namespaceTools, nil
 }
 
 func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
