@@ -15,7 +15,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: kittors/clirelay
+  # Fork-friendly: push to ghcr.io/<owner>/<repo> for the current repository.
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -47,7 +48,14 @@ jobs:
             VERSION="${REF_NAME}-${BACKEND_SHORT}"
             UI_VERSION_REF="${FRONTEND_REF}"
           fi
+          # Prefer a matching frontend branch; fall back to main for fork/feature branches.
           FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
+          if [ -z "${FRONTEND_COMMIT}" ] && [ "${FRONTEND_REF}" != "main" ]; then
+            echo "Frontend ref ${FRONTEND_REF} not found; falling back to main"
+            FRONTEND_REF="main"
+            UI_VERSION_REF="main"
+            FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/main" | awk '{print $1}')"
+          fi
           if [ -z "${FRONTEND_COMMIT}" ]; then
             echo "Unable to resolve frontend ref: ${FRONTEND_REF}" >&2
             exit 1
@@ -84,6 +92,7 @@ jobs:
             type=raw,value=main,enable=${{ github.ref_name == 'main' }}
             type=raw,value=dev,enable=${{ github.ref_name == 'dev' }}
             type=ref,event=tag
+            type=ref,event=branch
             type=raw,value=${{ github.ref_name }}-${{ steps.build_meta.outputs.backend_short }}
             type=sha,prefix=
             type=raw,value={{date 'YYYYMMDD'}}
