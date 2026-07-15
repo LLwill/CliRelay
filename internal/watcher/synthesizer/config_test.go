@@ -618,6 +618,35 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompatPropagatesUpstreamAPI(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:        "AutoProvider",
+				BaseURL:     "https://auto.example/v1",
+				UpstreamAPI: "auto",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "test-key"},
+				},
+			},
+		}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if got := auths[0].Attributes["upstream_api"]; got != "auto" {
+		t.Fatalf("upstream_api attribute = %q", got)
+	}
+}
+
 func mustDecodeOpenAICompatibility(t *testing.T, raw string) []config.OpenAICompatibility {
 	t.Helper()
 	var out []config.OpenAICompatibility

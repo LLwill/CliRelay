@@ -91,6 +91,17 @@ func TestDiffOpenAICompatibility_DisabledFlagChange(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (disabled false -> true)")
 }
 
+func TestDiffOpenAICompatibility_UpstreamAPIChange(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a", BaseURL: "https://provider.example/v1"}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", BaseURL: "https://provider.example/v1", UpstreamAPI: "auto"}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	if len(changes) != 1 {
+		t.Fatalf("expected one change, got %v", changes)
+	}
+	expectContains(t, changes, "provider updated: provider-a (upstream-api chat-completions(legacy) -> auto)")
+}
+
 func TestOpenAICompatKeyFallbacks(t *testing.T) {
 	entry := config.OpenAICompatibility{
 		BaseURL: "http://base",

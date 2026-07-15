@@ -111,7 +111,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				out, _ = sjson.SetRaw(out, "messages.-1", message)
 
-			case "function_call":
+			case "function_call", "custom_tool_call":
 				// Handle function call conversion to assistant message with tool_calls
 				assistantMessage := `{"role":"assistant","tool_calls":[]}`
 
@@ -122,17 +122,20 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.Set(toolCall, "function.name", name.String())
+					qualifiedName := qualifyResponsesNamespaceToolName(item.Get("namespace").String(), name.String())
+					toolCall, _ = sjson.Set(toolCall, "function.name", qualifiedName)
 				}
 
-				if arguments := item.Get("arguments"); arguments.Exists() {
+				if itemType == "custom_tool_call" {
+					toolCall, _ = sjson.Set(toolCall, "function.arguments", wrapResponsesCustomToolInput(item.Get("input").String()))
+				} else if arguments := item.Get("arguments"); arguments.Exists() {
 					toolCall, _ = sjson.Set(toolCall, "function.arguments", arguments.String())
 				}
 
 				assistantMessage, _ = sjson.SetRaw(assistantMessage, "tool_calls.0", toolCall)
 				out, _ = sjson.SetRaw(out, "messages.-1", assistantMessage)
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				// Handle function call output conversion to tool message
 				toolMessage := `{"role":"tool","tool_call_id":"","content":""}`
 
@@ -141,7 +144,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if output := item.Get("output"); output.Exists() {
-					toolMessage, _ = sjson.Set(toolMessage, "content", output.String())
+					toolMessage, _ = sjson.Set(toolMessage, "content", responsesToolOutputText(output))
 				}
 
 				out, _ = sjson.SetRaw(out, "messages.-1", toolMessage)
@@ -156,46 +159,32 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetRaw(out, "messages.-1", msg)
 	}
 
-	// Convert tools from responses format to chat completions format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
-
+	// Convert top-level tools and Codex Desktop additional_tools items. Namespace
+	// children are flattened to namespace__name so Chat Completions providers can
+	// invoke them as ordinary functions.
+	var chatCompletionsTools []interface{}
+	appendTools := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
+			for _, converted := range convertResponsesToolToOpenAIChatTools(tool) {
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(converted).Value())
 			}
-
-			chatTool := `{"type":"function","function":{}}`
-
-			// Convert tool structure from responses format to chat completions format
-			function := `{"name":"","description":"","parameters":{}}`
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.Set(function, "name", name.String())
-			}
-
-			if description := tool.Get("description"); description.Exists() {
-				function, _ = sjson.Set(function, "description", description.String())
-			}
-
-			if parameters := tool.Get("parameters"); parameters.Exists() {
-				function, _ = sjson.SetRaw(function, "parameters", parameters.Raw)
-			}
-
-			chatTool, _ = sjson.SetRaw(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.Parse(chatTool).Value())
-
 			return true
 		})
-
-		if len(chatCompletionsTools) > 0 {
-			out, _ = sjson.Set(out, "tools", chatCompletionsTools)
-		}
+	}
+	appendTools(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				appendTools(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	if len(chatCompletionsTools) > 0 {
+		out, _ = sjson.Set(out, "tools", chatCompletionsTools)
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
@@ -205,9 +194,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	// Convert tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.Set(out, "tool_choice", toolChoice.String())
+	// Chat Completions rejects tool_choice when tools are absent. Keep the two
+	// fields atomic even when every Responses built-in tool was unsupported.
+	if len(chatCompletionsTools) > 0 {
+		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+			if toolChoice.Type == gjson.String {
+				out, _ = sjson.Set(out, "tool_choice", toolChoice.String())
+			} else if toolChoice.IsObject() {
+				choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+				if choiceType == "function" || choiceType == "custom" {
+					name := qualifyResponsesNamespaceToolName(toolChoice.Get("namespace").String(), toolChoice.Get("name").String())
+					if name != "" {
+						choice := `{"type":"function","function":{"name":""}}`
+						choice, _ = sjson.Set(choice, "function.name", name)
+						out, _ = sjson.SetRaw(out, "tool_choice", choice)
+					}
+				}
+			}
+		}
 	}
 
 	return []byte(out)

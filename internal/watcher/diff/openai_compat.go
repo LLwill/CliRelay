@@ -65,7 +65,7 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	newKeyCount := countAPIKeys(newEntry)
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
-	details := make([]string, 0, 3)
+	details := make([]string, 0, 4)
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
@@ -75,6 +75,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
 	}
+	if oldMode, newMode := strings.TrimSpace(oldEntry.UpstreamAPI), strings.TrimSpace(newEntry.UpstreamAPI); oldMode != newMode {
+		details = append(details, fmt.Sprintf("upstream-api %s -> %s", displayOpenAICompatUpstreamAPI(oldMode), displayOpenAICompatUpstreamAPI(newMode)))
+	}
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
@@ -82,6 +85,13 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 		return ""
 	}
 	return "(" + strings.Join(details, ", ") + ")"
+}
+
+func displayOpenAICompatUpstreamAPI(value string) string {
+	if value == "" {
+		return "chat-completions(legacy)"
+	}
+	return value
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {
@@ -147,6 +157,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	}
 	if entry.Disabled {
 		parts = append(parts, "disabled=true")
+	}
+	if v := strings.TrimSpace(entry.UpstreamAPI); v != "" {
+		parts = append(parts, "upstream_api="+strings.ToLower(v))
 	}
 
 	models := make([]string, 0, len(entry.Models))

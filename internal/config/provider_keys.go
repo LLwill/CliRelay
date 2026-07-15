@@ -183,6 +183,11 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// UpstreamAPI selects the wire API used for this provider. Supported values
+	// are "chat-completions", "responses", and "auto". An empty value keeps the
+	// legacy Chat Completions behavior for backwards compatibility.
+	UpstreamAPI string `yaml:"upstream-api,omitempty" json:"upstream-api,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 

@@ -527,6 +527,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			if upstreamAPI := strings.TrimSpace(compat.UpstreamAPI); upstreamAPI != "" {
+				attrs["upstream_api"] = upstreamAPI
+			}
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -560,6 +563,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if upstreamAPI := strings.TrimSpace(compat.UpstreamAPI); upstreamAPI != "" {
+				attrs["upstream_api"] = upstreamAPI
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash

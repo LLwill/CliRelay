@@ -32,6 +32,7 @@ type oaiToResponsesState struct {
 	FuncArgsBuf  map[int]*strings.Builder // index -> args
 	FuncNames    map[int]string           // index -> name
 	FuncCallIDs  map[int]string           // index -> call_id
+	FuncMetadata map[int]responsesToolMetadata
 	// message item state per output index
 	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
@@ -63,6 +64,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			FuncArgsBuf:     make(map[int]*strings.Builder),
 			FuncNames:       make(map[int]string),
 			FuncCallIDs:     make(map[int]string),
+			FuncMetadata:    make(map[int]responsesToolMetadata),
 			MsgTextBuf:      make(map[int]*strings.Builder),
 			MsgItemAdded:    make(map[int]bool),
 			MsgContentAdded: make(map[int]bool),
@@ -73,6 +75,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
+	toolRequestJSON := responsesRequestJSON(originalRequestRawJSON, requestRawJSON)
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
@@ -138,6 +141,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncArgsBuf = make(map[int]*strings.Builder)
 		st.FuncNames = make(map[int]string)
 		st.FuncCallIDs = make(map[int]string)
+		st.FuncMetadata = make(map[int]responsesToolMetadata)
 		st.MsgItemAdded = make(map[int]bool)
 		st.MsgContentAdded = make(map[int]bool)
 		st.MsgItemDone = make(map[int]bool)
@@ -310,7 +314,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						newCallID := tc.Get("id").String()
 						nameChunk := tc.Get("function.name").String()
 						if nameChunk != "" {
-							st.FuncNames[callIndex] = nameChunk
+							metadata := responsesToolMetadataForName(toolRequestJSON, nameChunk)
+							st.FuncNames[callIndex] = metadata.Name
+							st.FuncMetadata[callIndex] = metadata
 						}
 						existingCallID := st.FuncCallIDs[callIndex]
 						effectiveCallID := existingCallID
@@ -327,7 +333,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							o, _ = sjson.Set(o, "output_index", callIndex)
 							o, _ = sjson.Set(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
 							o, _ = sjson.Set(o, "item.call_id", effectiveCallID)
-							o, _ = sjson.Set(o, "item.name", st.FuncNames[callIndex])
+							o = applyResponsesToolCallMetadata(o, "item", st.FuncMetadata[callIndex], "")
 							out = append(out, emitRespEvent("response.output_item.added", o))
 						}
 
@@ -340,7 +346,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							if refCallID == "" {
 								refCallID = newCallID
 							}
-							if refCallID != "" {
+							if refCallID != "" && !st.FuncMetadata[callIndex].Custom {
 								ad := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
 								ad, _ = sjson.Set(ad, "sequence_number", nextSeq())
 								ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", refCallID))
@@ -432,20 +438,28 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						if b := st.FuncArgsBuf[i]; b != nil && b.Len() > 0 {
 							args = b.String()
 						}
-						fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
-						fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
-						fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
-						fcDone, _ = sjson.Set(fcDone, "output_index", i)
-						fcDone, _ = sjson.Set(fcDone, "arguments", args)
-						out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
+						if st.FuncMetadata[i].Custom {
+							inputDone := `{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`
+							inputDone, _ = sjson.Set(inputDone, "sequence_number", nextSeq())
+							inputDone, _ = sjson.Set(inputDone, "item_id", fmt.Sprintf("fc_%s", callID))
+							inputDone, _ = sjson.Set(inputDone, "output_index", i)
+							inputDone, _ = sjson.Set(inputDone, "input", unwrapResponsesCustomToolInput(args))
+							out = append(out, emitRespEvent("response.custom_tool_call_input.done", inputDone))
+						} else {
+							fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
+							fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
+							fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
+							fcDone, _ = sjson.Set(fcDone, "output_index", i)
+							fcDone, _ = sjson.Set(fcDone, "arguments", args)
+							out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
+						}
 
 						itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`
 						itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
 						itemDone, _ = sjson.Set(itemDone, "output_index", i)
 						itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
-						itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
 						itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
-						itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[i])
+						itemDone = applyResponsesToolCallMetadata(itemDone, "item", st.FuncMetadata[i], args)
 						out = append(out, emitRespEvent("response.output_item.done", itemDone))
 						st.FuncItemDone[i] = true
 						st.FuncArgsDone[i] = true
@@ -575,9 +589,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						name := st.FuncNames[i]
 						item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
 						item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
-						item, _ = sjson.Set(item, "arguments", args)
 						item, _ = sjson.Set(item, "call_id", callID)
-						item, _ = sjson.Set(item, "name", name)
+						metadata := st.FuncMetadata[i]
+						if metadata.Name == "" {
+							metadata.Name = name
+						}
+						item = applyResponsesToolCallMetadata(item, "", metadata, args)
 						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 					}
 				}
@@ -611,6 +628,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 // from a non-streaming OpenAI Chat Completions response.
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := openaicompat.ParseResponseRoot(rawJSON)
+	toolRequestJSON := responsesRequestJSON(originalRequestRawJSON, requestRawJSON)
 
 	// Basic response scaffold
 	resp := `{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`
@@ -744,9 +762,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						args := tc.Get("function.arguments").String()
 						item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
 						item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
-						item, _ = sjson.Set(item, "arguments", args)
 						item, _ = sjson.Set(item, "call_id", callID)
-						item, _ = sjson.Set(item, "name", name)
+						item = applyResponsesToolCallMetadata(item, "", responsesToolMetadataForName(toolRequestJSON, name), args)
 						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 						return true
 					})

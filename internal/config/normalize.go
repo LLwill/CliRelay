@@ -143,6 +143,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.UpstreamAPI = normalizeOpenAICompatUpstreamAPI(e.UpstreamAPI)
 		e.Headers = NormalizeHeaders(e.Headers)
 		for j := range e.APIKeyEntries {
 			e.APIKeyEntries[j].ProxyURL = strings.TrimSpace(e.APIKeyEntries[j].ProxyURL)
@@ -154,6 +155,20 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+func normalizeOpenAICompatUpstreamAPI(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto":
+		return "auto"
+	case "responses", "response":
+		return "responses"
+	case "chat-completions", "chat_completions", "chat", "completions":
+		return "chat-completions"
+	default:
+		// Empty and unknown values deliberately retain the legacy behavior.
+		return ""
+	}
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
